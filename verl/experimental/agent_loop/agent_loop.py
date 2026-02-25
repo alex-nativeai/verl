@@ -469,7 +469,7 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs)
+        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
         return output
 
@@ -717,7 +717,11 @@ class AgentLoopWorker:
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-    def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
+    def _postprocess(
+        self,
+        inputs: list[_InternalAgentLoopOutput],
+        input_non_tensor_batch: dict | None = None,
+    ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         
         # # DEBUG: inspect prompt tensor widths before cat
@@ -775,6 +779,8 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
+        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
+            non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
@@ -789,8 +795,17 @@ class AgentLoopWorker:
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
+        # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
-        all_keys = set(key for input_item in inputs for key in input_item.extra_fields)
+        default_extra_keys = {
+            "turn_scores",
+            "tool_rewards",
+            "is_cancel",
+            "param_version_start",
+            "param_version_end",
+            "extras",
+        }
+        all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
             temp_arr = np.empty(len(inputs), dtype=object)
             temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
