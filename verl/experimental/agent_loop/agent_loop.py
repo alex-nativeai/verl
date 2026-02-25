@@ -719,6 +719,24 @@ class AgentLoopWorker:
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        
+        # # DEBUG: inspect prompt tensor widths before cat
+        # for i, inp in enumerate(inputs):
+        #     p = getattr(inp, "prompt_ids", None)
+        #     r = getattr(inp, "response_ids", None)
+        #     print(
+        #         f"[agent_loop debug] sample={i} "
+        #         f"prompt_shape={tuple(p.shape) if p is not None else None} "
+        #         f"response_shape={tuple(r.shape) if r is not None else None} "
+        #         f"prompt_len={p.shape[-1] if p is not None else None}",
+        #         flush=True
+        #     )
+
+        # lens = [inp.prompt_ids.shape[-1] for inp in inputs if getattr(inp, "prompt_ids", None) is not None]
+        # if len(set(lens)) > 1:
+        #     print(f"[agent_loop debug] prompt length mismatch: {sorted(set(lens))}", flush=True)
+
+
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_ids = torch.cat([input.response_ids for input in inputs], dim=0)

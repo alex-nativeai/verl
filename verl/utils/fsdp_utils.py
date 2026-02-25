@@ -588,6 +588,9 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         "base_model.model.model.",
         "base_model.model.model.layers.",
         "base_model.model.model.language_model.layers.",
+        # fsdp2 - NemotronH (uses 'backbone' instead of 'model' for inner model)
+        "base_model.model.backbone.",
+        "base_model.model.backbone.layers.",
     ]
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:

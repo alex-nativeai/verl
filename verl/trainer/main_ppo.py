@@ -22,6 +22,10 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+# ========== aded manually ==========
+import weave
+# ===================================
+
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
