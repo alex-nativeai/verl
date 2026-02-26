@@ -523,13 +523,40 @@ class vLLMHttpServer:
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
             # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            # For multi-turn, prompt_ids grows each turn. Use min(response_length, max_possible_tokens)
+            # instead of response_length + prompt_length - len(prompt_ids) which goes negative.
+            max_tokens = min(self.config.response_length, max_possible_tokens)
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
-
+        if max_tokens <= 0:
+            logger.warning(
+                "[MULTI-TURN PATCH WARNING](vLLM generate start)<request_id=%s> No context space left: prompt_len=%d max_model_len=%d response_length=%d",
+                request_id,
+                len(prompt_ids),
+                self.config.max_model_len,
+                self.config.response_length,
+            )
+            return TokenOutput(
+                token_ids=[],
+                log_probs=None,
+                routed_experts=None,
+                stop_reason="completed",
+                num_preempted=None,
+            )
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
+        )
+        logger.info(
+            "[MULTI-TURN PATCH INFO](vLLM generate start)<request_id=%s> len_prompt_ids=%d max_model_len=%d "
+            "response_length=%d max_possible_tokens=%d max_tokens=%d",
+            request_id,
+            len(prompt_ids),
+            self.config.max_model_len,
+            self.config.response_length,
+            max_possible_tokens,
+            max_tokens,
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
@@ -591,6 +618,22 @@ class vLLMHttpServer:
 
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
+
+        # Log updated context budget after generation (for multi-turn debugging)
+        prompt_len = len(prompt_ids)
+        response_len = len(token_ids)
+        total_after = prompt_len + response_len
+        remaining_budget = self.config.max_model_len - total_after
+        logger.info(
+            "[MULTI-TURN PATCH INFO](vLLM generate done)<request_id=%s> prompt_len=%d response_len=%d total_after=%d "
+            "remaining_budget=%d max_model_len=%d",
+            request_id,
+            prompt_len,
+            response_len,
+            total_after,
+            remaining_budget,
+            self.config.max_model_len,
+        )
 
         return TokenOutput(
             token_ids=token_ids,
