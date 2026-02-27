@@ -81,6 +81,36 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _wrap_gradient_checkpointing_with_autocast(model, dtype):
+    """Wrap gradient checkpointing to preserve autocast during backward recomputation.
+
+    Some models (e.g. OLMo3) experience dtype mismatches when gradient checkpointing
+    recomputes the forward pass without the original autocast context. Use context_fn
+    to ensure both forward and recompute run under the same autocast context.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    for module in model.modules():
+        if hasattr(module, "_gradient_checkpointing_func") and hasattr(module, "gradient_checkpointing"):
+            if module.gradient_checkpointing:
+                _dtype = dtype
+
+                def _autocast_ckpt_func(fn, *args, _dtype=_dtype, **kwargs):
+                    def context_fn():
+                        ctx = torch.autocast(device_type="cuda", dtype=_dtype)
+                        return ctx, ctx  # same context for forward and recompute
+
+                    return checkpoint(
+                        fn,
+                        *args,
+                        use_reentrant=False,
+                        context_fn=context_fn,
+                        **kwargs,
+                    )
+
+                module._gradient_checkpointing_func = _autocast_ckpt_func
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -260,6 +290,7 @@ class FSDPEngine(BaseEngine):
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                _wrap_gradient_checkpointing_with_autocast(module, torch_dtype)
         return module
 
     def _build_lora_module(self, module):

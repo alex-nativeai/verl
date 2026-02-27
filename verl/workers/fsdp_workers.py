@@ -97,6 +97,36 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _wrap_gradient_checkpointing_with_autocast(model, dtype):
+    """Wrap gradient checkpointing to preserve autocast during backward recomputation.
+
+    Some models (e.g. OLMo3) experience dtype mismatches when gradient checkpointing
+    recomputes the forward pass without the original autocast context. Use context_fn
+    to ensure both forward and recompute run under the same autocast context.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    for module in model.modules():
+        if hasattr(module, "_gradient_checkpointing_func") and hasattr(module, "gradient_checkpointing"):
+            if module.gradient_checkpointing:
+                _dtype = dtype
+
+                def _autocast_ckpt_func(fn, *args, _dtype=_dtype, **kwargs):
+                    def context_fn():
+                        ctx = torch.autocast(device_type="cuda", dtype=_dtype)
+                        return ctx, ctx  # same context for forward and recompute
+
+                    return checkpoint(
+                        fn,
+                        *args,
+                        use_reentrant=False,
+                        context_fn=context_fn,
+                        **kwargs,
+                    )
+
+                module._gradient_checkpointing_func = _autocast_ckpt_func
+
+
 def create_device_mesh(world_size, fsdp_size):
     if fsdp_size < 0 or fsdp_size >= world_size:
         device_mesh = init_device_mesh(device_name, mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
@@ -491,6 +521,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                _wrap_gradient_checkpointing_with_autocast(actor_module, torch_dtype)
 
         if self._is_lora:
             print("Applying LoRA to actor module")
@@ -1449,6 +1480,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 
             if config.model.get("enable_gradient_checkpointing", False):
                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                _wrap_gradient_checkpointing_with_autocast(critic_module, torch_dtype)
 
         if self._is_lora:
             print("Applying LoRA to critic module")
