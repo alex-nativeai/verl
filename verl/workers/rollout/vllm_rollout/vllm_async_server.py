@@ -536,7 +536,7 @@ class vLLMHttpServer:
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
         if max_tokens <= 0:
             logger.warning(
-                "[MULTI-TURN PATCH WARNING](vLLM generate start)<request_id=%s> No context space left: prompt_len=%d max_model_len=%d response_length=%d",
+                "[vLLM](generate start)<request_id=%s> No context space left: prompt_len=%d max_model_len=%d response_length=%d",
                 request_id,
                 len(prompt_ids),
                 self.config.max_model_len,
@@ -553,7 +553,7 @@ class vLLMHttpServer:
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
         logger.info(
-            "[MULTI-TURN PATCH INFO](vLLM generate start)<request_id=%s> len_prompt_ids=%d max_model_len=%d "
+            "[vLLM](generate start)<request_id=%s> len_prompt_ids=%d max_model_len=%d "
             "response_length=%d max_possible_tokens=%d max_tokens=%d",
             request_id,
             len(prompt_ids),
@@ -627,7 +627,7 @@ class vLLMHttpServer:
         total_after = prompt_len + response_len
         remaining_budget = self.config.max_model_len - total_after
         logger.info(
-            "[MULTI-TURN PATCH INFO](vLLM generate done)<request_id=%s> prompt_len=%d response_len=%d total_after=%d "
+            "[vLLM](generate done)<request_id=%s> prompt_len=%d response_len=%d total_after=%d "
             "remaining_budget=%d max_model_len=%d",
             request_id,
             prompt_len,

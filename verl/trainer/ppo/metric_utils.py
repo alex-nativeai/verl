@@ -119,6 +119,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
 
+    # LLM vs tool token breakdown: response_mask is 1 for LLM-generated, 0 for tool output
+    response_attn = batch.batch["attention_mask"][:, -max_response_length:].bool()
+    response_llm_mask = batch.batch["response_mask"].bool() & response_attn
+    response_length_llm = response_llm_mask.sum(-1).float()
+    response_length_tool = response_length - response_length_llm
+
+    total_rollout_length = response_info["prompt_length"] + response_info["response_length"]
+
     aborted_mask = (response_length == 0).bool()
     non_aborted_mask = ~aborted_mask
 
@@ -199,6 +207,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "response_length_non_aborted/max": non_aborted_response_length_max,
         "response_length_non_aborted/min": non_aborted_response_length_min,
         "response_length_non_aborted/clip_ratio": non_aborted_response_length_clip_ratio,
+        # response length: LLM-generated vs tool output
+        "response_length_llm/mean": torch.mean(response_length_llm).detach().item(),
+        "response_length_llm/max": torch.max(response_length_llm).detach().item(),
+        "response_length_llm/min": torch.min(response_length_llm).detach().item(),
+        "response_length_tool/mean": torch.mean(response_length_tool).detach().item(),
+        "response_length_tool/max": torch.max(response_length_tool).detach().item(),
+        "response_length_tool/min": torch.min(response_length_tool).detach().item(),
+        # total rollout length (prompt + response)
+        "total_rollout_length/mean": total_rollout_length.mean().item(),
+        "total_rollout_length/max": total_rollout_length.max().item(),
+        "total_rollout_length/min": total_rollout_length.min().item(),
         # aborted ratio
         # Fraction of samples whose response length is zero
         "response/aborted_ratio": aborted_ratio,

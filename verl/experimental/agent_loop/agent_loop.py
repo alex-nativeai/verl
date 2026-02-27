@@ -505,6 +505,9 @@ class AgentLoopWorker:
                 dataset_config=DictConfigWrap(self.config.data),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            # log total tokens
+            total_tokens = len(output.prompt_ids) + len(output.response_ids)
+            logger.info("[AGENT LOOP] sample=%s total_tokens=%d num_turns=%d", trajectory.get("sample_index"), total_tokens, output.num_turns)
             return await self._agent_loop_postprocess(output, **kwargs)
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
