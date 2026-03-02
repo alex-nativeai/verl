@@ -552,7 +552,7 @@ class vLLMHttpServer:
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
-        logger.info(
+        logger.debug(
             "[vLLM](generate start)<request_id=%s> len_prompt_ids=%d max_model_len=%d "
             "response_length=%d max_possible_tokens=%d max_tokens=%d",
             request_id,
@@ -626,7 +626,7 @@ class vLLMHttpServer:
         response_len = len(token_ids)
         total_after = prompt_len + response_len
         remaining_budget = self.config.max_model_len - total_after
-        logger.info(
+        logger.debug(
             "[vLLM](generate done)<request_id=%s> prompt_len=%d response_len=%d total_after=%d "
             "remaining_budget=%d max_model_len=%d",
             request_id,
