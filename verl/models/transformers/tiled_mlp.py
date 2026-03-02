@@ -257,6 +257,58 @@ def _patch_gpt_oss_experts_class(experts_class: type[nn.Module], num_shards: int
     experts_class.forward = tiled_forward
 
 
+def _patch_qwen3_moe_sparse_moe_block(block_class: type[nn.Module], num_shards: int):
+    """Patch Qwen3 MoE sparse block with token-chunked expert computation.
+
+    Qwen3 MoE uses nn.ModuleList of Qwen3MoeMLP experts. This patch reduces peak
+    activation memory by chunking per-expert token processing.
+    """
+
+    original_forward = block_class.forward
+
+    def tiled_forward(self: Any, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states_flat = hidden_states.view(-1, hidden_dim)
+
+        router_logits = self.gate(hidden_states_flat)
+        routing_weights = torch.nn.functional.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        if self.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros_like(
+            hidden_states_flat, dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+        expert_mask = torch.nn.functional.one_hot(
+            selected_experts, num_classes=self.num_experts
+        ).permute(2, 1, 0)
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero(as_tuple=False).flatten()
+
+        for expert_idx_t in expert_hit:
+            expert_idx = int(expert_idx_t.item())
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            if top_x.numel() == 0:
+                continue
+
+            chunk_size = max(1, (top_x.numel() + num_shards - 1) // num_shards)
+            for start in range(0, top_x.numel(), chunk_size):
+                end = min(start + chunk_size, top_x.numel())
+                tok = top_x[start:end]
+                pos = idx[start:end]
+
+                current_state = hidden_states_flat[tok]
+                current_hidden_states = expert_layer(current_state) * routing_weights[tok, pos, None]
+                final_hidden_states.index_add_(0, tok, current_hidden_states.to(hidden_states.dtype))
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+
+    block_class.forward = tiled_forward
+
+
 def apply_tiled_mlp_monkey_patch(
     num_shards: int = 4,
     model_type: Optional[str] = None,
@@ -277,15 +329,15 @@ def apply_tiled_mlp_monkey_patch(
         List of patched class names.
     """
     if model_type is None:
-        types_to_patch = [*list(_MODEL_TYPE_TO_MLP_CLASS.keys()), "gpt_oss"]
-    elif model_type == "gpt_oss":
+        types_to_patch = [*list(_MODEL_TYPE_TO_MLP_CLASS.keys()), "gpt_oss", "qwen3_moe"]
+    elif model_type in ("gpt_oss", "qwen3_moe"):
         types_to_patch = [model_type]
     elif model_type in _MODEL_TYPE_TO_MLP_CLASS:
         types_to_patch = [model_type]
     else:
         raise ValueError(
             f"TiledMLP does not support model_type='{model_type}'. "
-            f"Supported types: {list(_MODEL_TYPE_TO_MLP_CLASS.keys())}. "
+            f"Supported types: {list(_MODEL_TYPE_TO_MLP_CLASS.keys())}, gpt_oss, qwen3_moe. "
             f"For SwiGLU-style MLPs, you can add support by extending _MODEL_TYPE_TO_MLP_CLASS "
             f"in verl/models/transformers/tiled_mlp.py"
         )
@@ -302,6 +354,14 @@ def apply_tiled_mlp_monkey_patch(
                 _patch_gpt_oss_experts_class(experts_class, num_shards)
                 if "GptOssExperts" not in patched_classes:
                     patched_classes.append("GptOssExperts")
+                continue
+
+            if mtype == "qwen3_moe":
+                module = importlib.import_module("transformers.models.qwen3_moe.modeling_qwen3_moe")
+                block_class = getattr(module, "Qwen3MoeSparseMoeBlock")
+                _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
+                if "Qwen3MoeSparseMoeBlock" not in patched_classes:
+                    patched_classes.append("Qwen3MoeSparseMoeBlock")
                 continue
 
             module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
