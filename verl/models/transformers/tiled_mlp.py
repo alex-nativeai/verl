@@ -20,7 +20,7 @@ useful for large models with FSDP2 training.
 """
 
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -174,6 +174,80 @@ _MODEL_TYPE_TO_MLP_CLASS = {
 }
 
 
+def _patch_gpt_oss_experts_class(experts_class: type[nn.Module], num_shards: int):
+    """Patch GPT-OSS MoE experts forward with token-chunked computation.
+
+    GPT-OSS uses MoE experts instead of dense SwiGLU MLP modules. This patch reduces
+    peak activation memory by chunking per-expert token processing.
+    """
+
+    original_forward = experts_class.forward
+
+    def _flatten_tokens(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...] | None]:
+        if x.ndim == 2:
+            return x, None
+        if x.ndim == 3:
+            bsz, seqlen, hidden = x.shape
+            return x.reshape(-1, hidden), (bsz, seqlen, hidden)
+        raise RuntimeError(f"Unsupported hidden_states rank for GPT-OSS experts: {x.ndim}")
+
+    def _flatten_router(x: torch.Tensor, shape: tuple[int, ...] | None) -> torch.Tensor:
+        if shape is None:
+            return x
+        bsz, seqlen, _hidden = shape
+        return x.reshape(bsz * seqlen, x.shape[-1])
+
+    def tiled_forward(
+        self: Any,
+        hidden_states: torch.Tensor,
+        router_indices: torch.Tensor | None = None,
+        routing_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Fallback to upstream behavior for unexpected invocation patterns.
+        if router_indices is None or routing_weights is None:
+            return original_forward(self, hidden_states, router_indices, routing_weights)
+
+        hidden_flat, restore_shape = _flatten_tokens(hidden_states)
+        router_idx_flat = _flatten_router(router_indices, restore_shape)
+        routing_w_flat = _flatten_router(routing_weights, restore_shape)
+
+        next_states = torch.zeros_like(hidden_flat, dtype=hidden_flat.dtype, device=hidden_flat.device)
+
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(router_idx_flat, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero(as_tuple=False).flatten()
+
+        for expert_idx_t in expert_hit:
+            expert_idx = int(expert_idx_t.item())
+            if expert_idx == self.num_experts:
+                continue
+
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            if token_idx.numel() == 0:
+                continue
+
+            chunk_size = max(1, (token_idx.numel() + num_shards - 1) // num_shards)
+            for start in range(0, token_idx.numel(), chunk_size):
+                end = min(start + chunk_size, token_idx.numel())
+                tok = token_idx[start:end]
+                pos = top_k_pos[start:end]
+
+                current_state = hidden_flat[tok]
+                gate_up = current_state @ self.gate_up_proj[expert_idx] + self.gate_up_proj_bias[expert_idx]
+                gated_output = self._apply_gate(gate_up)
+                out = gated_output @ self.down_proj[expert_idx] + self.down_proj_bias[expert_idx]
+                weighted_output = out * routing_w_flat[tok, pos, None]
+                next_states.index_add_(0, tok, weighted_output.to(hidden_flat.dtype))
+
+        if restore_shape is None:
+            return next_states
+
+        bsz, seqlen, hidden = restore_shape
+        return next_states.reshape(bsz, seqlen, hidden)
+
+    experts_class.forward = tiled_forward
+
+
 def apply_tiled_mlp_monkey_patch(
     num_shards: int = 4,
     model_type: Optional[str] = None,
@@ -194,7 +268,9 @@ def apply_tiled_mlp_monkey_patch(
         List of patched class names.
     """
     if model_type is None:
-        types_to_patch = list(_MODEL_TYPE_TO_MLP_CLASS.keys())
+        types_to_patch = [*list(_MODEL_TYPE_TO_MLP_CLASS.keys()), "gpt_oss"]
+    elif model_type == "gpt_oss":
+        types_to_patch = [model_type]
     elif model_type in _MODEL_TYPE_TO_MLP_CLASS:
         types_to_patch = [model_type]
     else:
@@ -208,10 +284,18 @@ def apply_tiled_mlp_monkey_patch(
     patched_classes = []
 
     for mtype in types_to_patch:
-        module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
         try:
             import importlib
 
+            if mtype == "gpt_oss":
+                module = importlib.import_module("transformers.models.gpt_oss.modeling_gpt_oss")
+                experts_class = getattr(module, "GptOssExperts")
+                _patch_gpt_oss_experts_class(experts_class, num_shards)
+                if "GptOssExperts" not in patched_classes:
+                    patched_classes.append("GptOssExperts")
+                continue
+
+            module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
             module = importlib.import_module(module_path)
             mlp_class = getattr(module, class_name)
             _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
