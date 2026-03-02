@@ -236,7 +236,16 @@ def _patch_gpt_oss_experts_class(experts_class: type[nn.Module], num_shards: int
                 gate_up = current_state @ self.gate_up_proj[expert_idx] + self.gate_up_proj_bias[expert_idx]
                 gated_output = self._apply_gate(gate_up)
                 out = gated_output @ self.down_proj[expert_idx] + self.down_proj_bias[expert_idx]
-                weighted_output = out * routing_w_flat[tok, pos, None]
+                # Support both GPT-OSS router score layouts across transformers versions.
+                # Prefer expert-axis indexing when ambiguous (e.g., top_k == num_experts).
+                if routing_w_flat.shape[1] == self.num_experts:
+                    weights = routing_w_flat[tok, expert_idx]
+                elif routing_w_flat.shape[1] == router_idx_flat.shape[1]:
+                    weights = routing_w_flat[tok, pos]
+                else:
+                    return original_forward(self, hidden_states, router_indices, routing_weights)
+
+                weighted_output = out * weights[:, None]
                 next_states.index_add_(0, tok, weighted_output.to(hidden_flat.dtype))
 
         if restore_shape is None:
