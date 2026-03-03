@@ -820,6 +820,57 @@ class AgentLoopWorker:
             temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
             extra_fields[key] = temp_arr
 
+        def _sum_int_list(x: Any) -> int:
+            if isinstance(x, list):
+                return int(sum(int(v) for v in x))
+            return 0
+
+        def _max_int_list(x: Any) -> int:
+            if isinstance(x, list) and x:
+                return int(max(int(v) for v in x))
+            return 0
+
+        # Numeric rollout diagnostics for easier metric aggregation and filtering.
+        non_tensor_batch["tool_call_counts"] = np.array(
+            [int(input_item.extra_fields.get("tool_call_count", 0) or 0) for input_item in inputs], dtype=np.int32
+        )
+        non_tensor_batch["assistant_tokens_total"] = np.array(
+            [_sum_int_list(input_item.extra_fields.get("assistant_tokens_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["tool_tokens_total"] = np.array(
+            [_sum_int_list(input_item.extra_fields.get("tool_tokens_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["tool_tokens_raw_total"] = np.array(
+            [_sum_int_list(input_item.extra_fields.get("tool_tokens_raw_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["interaction_tokens_total"] = np.array(
+            [_sum_int_list(input_item.extra_fields.get("interaction_tokens_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["interaction_tokens_raw_total"] = np.array(
+            [_sum_int_list(input_item.extra_fields.get("interaction_tokens_raw_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["max_prompt_tokens_before_generate"] = np.array(
+            [_max_int_list(input_item.extra_fields.get("prompt_tokens_before_generate")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["max_assistant_turn_tokens"] = np.array(
+            [_max_int_list(input_item.extra_fields.get("assistant_tokens_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["max_tool_turn_tokens"] = np.array(
+            [_max_int_list(input_item.extra_fields.get("tool_tokens_raw_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+        non_tensor_batch["max_interaction_turn_tokens"] = np.array(
+            [_max_int_list(input_item.extra_fields.get("interaction_tokens_raw_per_turn")) for input_item in inputs],
+            dtype=np.int32,
+        )
+
         non_tensor_batch.update(extra_fields)
 
         # Only include reward_extra_keys in meta_info if rm_scores is in batch

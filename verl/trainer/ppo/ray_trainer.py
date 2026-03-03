@@ -433,10 +433,32 @@ class RayPPOTrainer:
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
-                    "request_id",
-                    batch.non_tensor_batch["request_id"].tolist(),
-                )
+                reward_extra_infos_to_dump.setdefault("request_id", batch.non_tensor_batch["request_id"].tolist())
+
+            # Add rollout length diagnostics to dumped jsonl for offline analysis.
+            rollout_diag_keys = [
+                "tool_call_counts",
+                "assistant_tokens_total",
+                "tool_tokens_total",
+                "tool_tokens_raw_total",
+                "interaction_tokens_total",
+                "interaction_tokens_raw_total",
+                "max_prompt_tokens_before_generate",
+                "max_assistant_turn_tokens",
+                "max_tool_turn_tokens",
+                "max_interaction_turn_tokens",
+                "prompt_tokens_before_generate",
+                "assistant_tokens_per_turn",
+                "tool_tokens_per_turn",
+                "tool_tokens_raw_per_turn",
+                "interaction_tokens_per_turn",
+                "interaction_tokens_raw_per_turn",
+            ]
+            for key in rollout_diag_keys:
+                if key in batch.non_tensor_batch:
+                    values = batch.non_tensor_batch[key]
+                    if len(values) == len(inputs):
+                        reward_extra_infos_to_dump[key] = values.tolist() if hasattr(values, "tolist") else list(values)
 
             self._dump_generations(
                 inputs=inputs,

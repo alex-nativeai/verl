@@ -78,6 +78,21 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     )
 
 
+def _add_non_tensor_scalar_stats(
+    metrics: dict[str, Any], batch: DataProto, non_tensor_key: str, metric_prefix: str
+) -> None:
+    """Add min/max/mean stats for a scalar non-tensor field when available."""
+    if non_tensor_key not in batch.non_tensor_batch:
+        return
+    values = np.asarray(batch.non_tensor_batch[non_tensor_key], dtype=np.float32)
+    if values.size == 0:
+        return
+    tensor = torch.from_numpy(values)
+    metrics[f"{metric_prefix}/min"] = tensor.min().item()
+    metrics[f"{metric_prefix}/max"] = tensor.max().item()
+    metrics[f"{metric_prefix}/mean"] = tensor.mean().item()
+
+
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
@@ -240,6 +255,26 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/min"] = tool_call_counts.min()
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
+
+    _add_non_tensor_scalar_stats(metrics, batch, "assistant_tokens_total", "assistant_tokens_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_total", "tool_tokens_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_raw_total", "tool_tokens_raw_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_total", "interaction_tokens_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_raw_total", "interaction_tokens_raw_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "max_prompt_tokens_before_generate", "max_prompt_tokens_before_generate")
+    _add_non_tensor_scalar_stats(metrics, batch, "max_assistant_turn_tokens", "max_assistant_turn_tokens")
+    _add_non_tensor_scalar_stats(metrics, batch, "max_tool_turn_tokens", "max_tool_turn_tokens")
+    _add_non_tensor_scalar_stats(metrics, batch, "max_interaction_turn_tokens", "max_interaction_turn_tokens")
+
+    if "tool_tokens_total" in batch.non_tensor_batch and "interaction_tokens_total" in batch.non_tensor_batch:
+        tool_and_interaction = torch.from_numpy(
+            np.asarray(batch.non_tensor_batch["tool_tokens_total"], dtype=np.float32)
+            + np.asarray(batch.non_tensor_batch["interaction_tokens_total"], dtype=np.float32)
+        )
+        response_tool_gap = torch.abs(response_length_tool - tool_and_interaction)
+        metrics["response_length_tool_breakdown_abs_error/mean"] = response_tool_gap.mean().item()
+        metrics["response_length_tool_breakdown_abs_error/max"] = response_tool_gap.max().item()
+        metrics["response_length_tool_breakdown_abs_error/min"] = response_tool_gap.min().item()
 
     return metrics
 

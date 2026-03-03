@@ -81,6 +81,15 @@ class AgentData:
         self.tool_rewards: list[float] = []
         self.user_turns = 0
         self.assistant_turns = 0
+        self.tool_call_count = 0
+
+        # Per-sample diagnostics for rollout-length forensics
+        self.prompt_tokens_before_generate: list[int] = []
+        self.assistant_tokens_per_turn: list[int] = []
+        self.tool_tokens_per_turn: list[int] = []
+        self.tool_tokens_raw_per_turn: list[int] = []
+        self.interaction_tokens_per_turn: list[int] = []
+        self.interaction_tokens_raw_per_turn: list[int] = []
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
@@ -195,7 +204,19 @@ class ToolAgentLoop(AgentLoopBase):
             routed_experts=agent_data.routed_experts,
             extra_fields={},
         )
-        output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields.update(
+            {
+                "turn_scores": agent_data.turn_scores,
+                "tool_rewards": agent_data.tool_rewards,
+                "tool_call_count": agent_data.tool_call_count,
+                "prompt_tokens_before_generate": agent_data.prompt_tokens_before_generate,
+                "assistant_tokens_per_turn": agent_data.assistant_tokens_per_turn,
+                "tool_tokens_per_turn": agent_data.tool_tokens_per_turn,
+                "tool_tokens_raw_per_turn": agent_data.tool_tokens_raw_per_turn,
+                "interaction_tokens_per_turn": agent_data.interaction_tokens_per_turn,
+                "interaction_tokens_raw_per_turn": agent_data.interaction_tokens_raw_per_turn,
+            }
+        )
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -216,6 +237,7 @@ class ToolAgentLoop(AgentLoopBase):
         add_messages: list[dict[str, Any]] = []
 
         with simple_timer("generate_sequences", agent_data.metrics):
+            agent_data.prompt_tokens_before_generate.append(len(agent_data.prompt_ids))
             output = await self.server_manager.generate(
                 request_id=agent_data.request_id,
                 prompt_ids=agent_data.prompt_ids,
@@ -241,6 +263,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
+        agent_data.assistant_tokens_per_turn.append(len(agent_data.response_ids))
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if output.log_probs:
@@ -286,6 +309,7 @@ class ToolAgentLoop(AgentLoopBase):
         for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
             tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
             tool_call_names.append(tool_call.name)
+        agent_data.tool_call_count += len(tasks)
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
@@ -360,7 +384,10 @@ class ToolAgentLoop(AgentLoopBase):
                 remove_system_prompt=True,
             )
 
-        if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+        tool_tokens_raw = len(response_ids)
+        agent_data.tool_tokens_raw_per_turn.append(tool_tokens_raw)
+        if len(agent_data.response_mask) + tool_tokens_raw >= self.response_length:
+            agent_data.tool_tokens_per_turn.append(0)
             return AgentState.TERMINATED
         # Update prompt_ids and response_mask
 
@@ -372,10 +399,11 @@ class ToolAgentLoop(AgentLoopBase):
             for img in new_images_this_turn:
                 agent_data.image_data.append(img)
 
+        agent_data.tool_tokens_per_turn.append(tool_tokens_raw)
         agent_data.prompt_ids += response_ids
-        agent_data.response_mask += [0] * len(response_ids)
+        agent_data.response_mask += [0] * tool_tokens_raw
         if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
+            agent_data.response_logprobs += [0.0] * tool_tokens_raw
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
@@ -402,9 +430,12 @@ class ToolAgentLoop(AgentLoopBase):
             add_messages,
             remove_system_prompt=True,
         )
+        interaction_tokens_raw = len(response_ids)
+        agent_data.interaction_tokens_raw_per_turn.append(interaction_tokens_raw)
 
         remaining_response_tokens = self.response_length - len(agent_data.response_mask)
         if remaining_response_tokens <= 0:
+            agent_data.interaction_tokens_per_turn.append(0)
             logger.warning(
                 "Interaction feedback skipped due to exhausted response budget: used=%d budget=%d",
                 len(agent_data.response_mask),
@@ -424,11 +455,14 @@ class ToolAgentLoop(AgentLoopBase):
             response_ids = response_ids[:remaining_response_tokens]
             force_terminate = True
 
+        interaction_tokens_added = len(response_ids)
+        agent_data.interaction_tokens_per_turn.append(interaction_tokens_added)
+
         # Update prompt_ids and response_mask
         agent_data.prompt_ids += response_ids
-        agent_data.response_mask += [0] * len(response_ids)
+        agent_data.response_mask += [0] * interaction_tokens_added
         if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
+            agent_data.response_logprobs += [0.0] * interaction_tokens_added
 
         if should_terminate_sequence or force_terminate or len(agent_data.response_mask) >= self.response_length:
             return AgentState.TERMINATED
