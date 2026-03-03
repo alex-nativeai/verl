@@ -252,19 +252,36 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     if "tool_call_counts" in batch.non_tensor_batch:
         tool_call_counts = batch.non_tensor_batch["tool_call_counts"]
-        metrics["tool_call_counts/min"] = tool_call_counts.min()
-        metrics["tool_call_counts/max"] = tool_call_counts.max()
-        metrics["tool_call_counts/mean"] = tool_call_counts.mean()
+        metrics["rollout_diag/tool_call_counts/min"] = tool_call_counts.min()
+        metrics["rollout_diag/tool_call_counts/max"] = tool_call_counts.max()
+        metrics["rollout_diag/tool_call_counts/mean"] = tool_call_counts.mean()
 
-    _add_non_tensor_scalar_stats(metrics, batch, "assistant_tokens_total", "assistant_tokens_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_total", "tool_tokens_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_raw_total", "tool_tokens_raw_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_total", "interaction_tokens_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_raw_total", "interaction_tokens_raw_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "max_prompt_tokens_before_generate", "max_prompt_tokens_before_generate")
-    _add_non_tensor_scalar_stats(metrics, batch, "max_assistant_turn_tokens", "max_assistant_turn_tokens")
-    _add_non_tensor_scalar_stats(metrics, batch, "max_tool_turn_tokens", "max_tool_turn_tokens")
-    _add_non_tensor_scalar_stats(metrics, batch, "max_interaction_turn_tokens", "max_interaction_turn_tokens")
+    _add_non_tensor_scalar_stats(metrics, batch, "assistant_tokens_total", "rollout_diag/assistant_tokens_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_total", "rollout_diag/tool_tokens_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_raw_total", "rollout_diag/tool_tokens_raw_total")
+    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_total", "rollout_diag/interaction_tokens_total")
+    _add_non_tensor_scalar_stats(
+        metrics, batch, "interaction_tokens_raw_total", "rollout_diag/interaction_tokens_raw_total"
+    )
+    _add_non_tensor_scalar_stats(
+        metrics,
+        batch,
+        "max_prompt_tokens_before_generate",
+        "rollout_diag/max_prompt_tokens_before_generate",
+    )
+    _add_non_tensor_scalar_stats(
+        metrics,
+        batch,
+        "max_assistant_turn_tokens",
+        "rollout_diag/max_assistant_turn_tokens",
+    )
+    _add_non_tensor_scalar_stats(metrics, batch, "max_tool_turn_tokens", "rollout_diag/max_tool_turn_tokens")
+    _add_non_tensor_scalar_stats(
+        metrics,
+        batch,
+        "max_interaction_turn_tokens",
+        "rollout_diag/max_interaction_turn_tokens",
+    )
 
     if "tool_tokens_total" in batch.non_tensor_batch and "interaction_tokens_total" in batch.non_tensor_batch:
         tool_and_interaction = torch.from_numpy(
@@ -272,9 +289,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             + np.asarray(batch.non_tensor_batch["interaction_tokens_total"], dtype=np.float32)
         )
         response_tool_gap = torch.abs(response_length_tool - tool_and_interaction)
-        metrics["response_length_tool_breakdown_abs_error/mean"] = response_tool_gap.mean().item()
-        metrics["response_length_tool_breakdown_abs_error/max"] = response_tool_gap.max().item()
-        metrics["response_length_tool_breakdown_abs_error/min"] = response_tool_gap.min().item()
+        metrics["rollout_diag/response_length_tool_breakdown_abs_error/mean"] = response_tool_gap.mean().item()
+        metrics["rollout_diag/response_length_tool_breakdown_abs_error/max"] = response_tool_gap.max().item()
+        metrics["rollout_diag/response_length_tool_breakdown_abs_error/min"] = response_tool_gap.min().item()
 
     return metrics
 
