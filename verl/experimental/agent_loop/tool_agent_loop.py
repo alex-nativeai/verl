@@ -223,6 +223,15 @@ class ToolAgentLoop(AgentLoopBase):
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
             )
+        if len(output.token_ids) == 0:
+            logger.warning(
+                "Generation returned no tokens; terminating sequence. used=%d budget=%d stop_reason=%s",
+                len(agent_data.response_mask),
+                self.response_length,
+                output.stop_reason,
+            )
+            return AgentState.TERMINATED
+
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
             agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -394,15 +403,34 @@ class ToolAgentLoop(AgentLoopBase):
             remove_system_prompt=True,
         )
 
+        remaining_response_tokens = self.response_length - len(agent_data.response_mask)
+        if remaining_response_tokens <= 0:
+            logger.warning(
+                "Interaction feedback skipped due to exhausted response budget: used=%d budget=%d",
+                len(agent_data.response_mask),
+                self.response_length,
+            )
+            return AgentState.TERMINATED
+
+        force_terminate = False
+        if len(response_ids) > remaining_response_tokens:
+            logger.warning(
+                "Interaction feedback truncated to fit response budget: incoming=%d remaining=%d used=%d budget=%d",
+                len(response_ids),
+                remaining_response_tokens,
+                len(agent_data.response_mask),
+                self.response_length,
+            )
+            response_ids = response_ids[:remaining_response_tokens]
+            force_terminate = True
+
         # Update prompt_ids and response_mask
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
 
-        # double check prompt
-        # Check termination condition
-        if should_terminate_sequence:
+        if should_terminate_sequence or force_terminate or len(agent_data.response_mask) >= self.response_length:
             return AgentState.TERMINATED
         else:
             return AgentState.GENERATING
