@@ -325,6 +325,80 @@ def _patch_qwen3_moe_sparse_moe_block(block_class: type[nn.Module], num_shards: 
     block_class.forward = tiled_forward
 
 
+def _patch_qwen3_moe_experts_class(experts_class: type[nn.Module], num_shards: int):
+    """Patch packed Qwen3MoeExperts forward with token-chunked computation.
+
+    This matches newer transformers layouts where MoE experts are packed tensors.
+    """
+
+    original_forward = experts_class.forward
+
+    def _flatten_tokens(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...] | None]:
+        if x.ndim == 2:
+            return x, None
+        if x.ndim == 3:
+            bsz, seqlen, hidden = x.shape
+            return x.reshape(-1, hidden), (bsz, seqlen, hidden)
+        raise RuntimeError(f"Unsupported hidden_states rank for Qwen3Moe experts: {x.ndim}")
+
+    def _flatten_router(x: torch.Tensor, shape: tuple[int, ...] | None) -> torch.Tensor:
+        if shape is None:
+            return x
+        bsz, seqlen, _hidden = shape
+        return x.reshape(bsz * seqlen, x.shape[-1])
+
+    def tiled_forward(
+        self: Any,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor | None = None,
+        top_k_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Keep upstream behavior for unexpected call patterns.
+        if top_k_index is None or top_k_weights is None:
+            return original_forward(self, hidden_states, top_k_index, top_k_weights)
+
+        hidden_flat, restore_shape = _flatten_tokens(hidden_states)
+        top_k_index_flat = _flatten_router(top_k_index, restore_shape)
+        top_k_weights_flat = _flatten_router(top_k_weights, restore_shape)
+
+        final_hidden_states = torch.zeros_like(hidden_flat)
+
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index_flat, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero(as_tuple=False).flatten()
+
+        for expert_idx_t in expert_hit:
+            expert_idx = int(expert_idx_t.item())
+            if expert_idx == self.num_experts:
+                continue
+
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            if token_idx.numel() == 0:
+                continue
+
+            chunk_size = max(1, (token_idx.numel() + num_shards - 1) // num_shards)
+            for start in range(0, token_idx.numel(), chunk_size):
+                end = min(start + chunk_size, token_idx.numel())
+                tok = token_idx[start:end]
+                pos = top_k_pos[start:end]
+
+                current_state = hidden_flat[tok]
+                gate, up = torch.nn.functional.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+                current_hidden_states = self.act_fn(gate) * up
+                current_hidden_states = torch.nn.functional.linear(current_hidden_states, self.down_proj[expert_idx])
+                current_hidden_states = current_hidden_states * top_k_weights_flat[tok, pos, None]
+                final_hidden_states.index_add_(0, tok, current_hidden_states.to(final_hidden_states.dtype))
+
+        if restore_shape is None:
+            return final_hidden_states
+
+        bsz, seqlen, hidden = restore_shape
+        return final_hidden_states.reshape(bsz, seqlen, hidden)
+
+    experts_class.forward = tiled_forward
+
+
 def apply_tiled_mlp_monkey_patch(
     num_shards: int = 4,
     model_type: Optional[str] = None,
@@ -374,10 +448,29 @@ def apply_tiled_mlp_monkey_patch(
 
             if mtype == "qwen3_moe":
                 module = importlib.import_module("transformers.models.qwen3_moe.modeling_qwen3_moe")
-                block_class = getattr(module, "Qwen3MoeSparseMoeBlock")
-                _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
-                if "Qwen3MoeSparseMoeBlock" not in patched_classes:
-                    patched_classes.append("Qwen3MoeSparseMoeBlock")
+                # Prefer patching packed experts when available (newer transformers).
+                if hasattr(module, "Qwen3MoeExperts"):
+                    experts_class = getattr(module, "Qwen3MoeExperts")
+                    _patch_qwen3_moe_experts_class(experts_class, num_shards)
+                    if "Qwen3MoeExperts" not in patched_classes:
+                        patched_classes.append("Qwen3MoeExperts")
+                # Fallback to per-expert MLP patch for older/community variants.
+                elif hasattr(module, "Qwen3MoeMLP"):
+                    mlp_class = getattr(module, "Qwen3MoeMLP")
+                    _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
+                    if "Qwen3MoeMLP" not in patched_classes:
+                        patched_classes.append("Qwen3MoeMLP")
+                # Last-resort fallback for very old forks that expose sparse block only.
+                elif hasattr(module, "Qwen3MoeSparseMoeBlock"):
+                    block_class = getattr(module, "Qwen3MoeSparseMoeBlock")
+                    _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
+                    if "Qwen3MoeSparseMoeBlock" not in patched_classes:
+                        patched_classes.append("Qwen3MoeSparseMoeBlock")
+                else:
+                    raise AttributeError(
+                        "Could not find Qwen3 MoE patch target. Expected one of "
+                        "Qwen3MoeExperts/Qwen3MoeMLP/Qwen3MoeSparseMoeBlock."
+                    )
                 continue
 
             module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
