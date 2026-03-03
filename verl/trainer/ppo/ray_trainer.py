@@ -1504,18 +1504,30 @@ class RayPPOTrainer:
                         )
                         # Check if the conditions for saving a checkpoint are met.
                         # The conditions include a mandatory condition (1) and
-                        # one of the following optional conditions (2/3/4):
+                        # one of the following optional conditions (2/3/4/5):
                         # 1. The save frequency is set to a positive value.
                         # 2. It's the last training step.
                         # 3. The current step number is a multiple of the save frequency.
                         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                        if self.config.trainer.save_freq > 0 and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.save_freq == 0
-                            or esi_close_to_expiration
+                        # 5. End of epoch (configurable via trainer.save_at_epoch_end).
+                        steps_per_epoch = len(self.train_dataloader)
+                        is_end_of_epoch = (
+                            steps_per_epoch > 0
+                            and self.global_steps % steps_per_epoch == 0
+                            and self.config.trainer.get("save_at_epoch_end", False)
+                        )
+                        if (
+                            (self.config.trainer.save_freq > 0 and (
+                                is_last_step
+                                or self.global_steps % self.config.trainer.save_freq == 0
+                                or esi_close_to_expiration
+                            ))
+                            or is_end_of_epoch
                         ):
                             if esi_close_to_expiration:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")
+                            if is_end_of_epoch:
+                                print(f"Saving checkpoint at end of epoch {epoch + 1} (step {self.global_steps}).")
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
                                 self._save_checkpoint()
 
