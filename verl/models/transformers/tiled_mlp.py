@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-
+`
 
 class GradientAccumulator:
     """Gradient accumulator for TiledMLP (FSDP compatible).
@@ -233,9 +233,27 @@ def _patch_gpt_oss_experts_class(experts_class: type[nn.Module], num_shards: int
                 pos = top_k_pos[start:end]
 
                 current_state = hidden_flat[tok]
-                gate_up = current_state @ self.gate_up_proj[expert_idx] + self.gate_up_proj_bias[expert_idx]
-                gated_output = self._apply_gate(gate_up)
-                out = gated_output @ self.down_proj[expert_idx] + self.down_proj_bias[expert_idx]
+                gate_up = current_state @ self.gate_up_proj[expert_idx]
+                gate_up_proj_bias = getattr(self, "gate_up_proj_bias", None)
+                if gate_up_proj_bias is not None:
+                    gate_up = gate_up + gate_up_proj_bias[expert_idx]
+                # Handle both GPT-OSS variants:
+                # - older/newer classes exposing `_apply_gate`
+                # - classes without `_apply_gate` (inline gate math)
+                if hasattr(self, "_apply_gate"):
+                    gated_output = self._apply_gate(gate_up)
+                else:
+                    gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+                    limit = getattr(self, "limit", 7.0)
+                    alpha = getattr(self, "alpha", 1.702)
+                    gate = gate.clamp(min=None, max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                    glu = gate * torch.sigmoid(gate * alpha)
+                    gated_output = (up + 1) * glu
+                out = gated_output @ self.down_proj[expert_idx]
+                down_proj_bias = getattr(self, "down_proj_bias", None)
+                if down_proj_bias is not None:
+                    out = out + down_proj_bias[expert_idx]
                 # Support both GPT-OSS router score layouts across transformers versions.
                 # Prefer expert-axis indexing when ambiguous (e.g., top_k == num_experts).
                 if routing_w_flat.shape[1] == self.num_experts:
@@ -257,56 +275,79 @@ def _patch_gpt_oss_experts_class(experts_class: type[nn.Module], num_shards: int
     experts_class.forward = tiled_forward
 
 
-def _patch_qwen3_moe_sparse_moe_block(block_class: type[nn.Module], num_shards: int):
-    """Patch Qwen3 MoE sparse block with token-chunked expert computation.
+def _patch_qwen3_moe_experts_class(experts_class: type[nn.Module], num_shards: int):
+    """Patch Qwen3MoE experts forward with token-chunked computation.
 
-    Qwen3 MoE uses nn.ModuleList of Qwen3MoeMLP experts. This patch reduces peak
-    activation memory by chunking per-expert token processing.
+    This keeps the upstream Qwen3MoeExperts.forward signature and return shape:
+    forward(hidden_states, top_k_index, top_k_weights) -> hidden_states.
     """
 
-    original_forward = block_class.forward
+    original_forward = experts_class.forward
 
-    def tiled_forward(self: Any, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states_flat = hidden_states.view(-1, hidden_dim)
+    def _flatten_tokens(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...] | None]:
+        if x.ndim == 2:
+            return x, None
+        if x.ndim == 3:
+            bsz, seqlen, hidden = x.shape
+            return x.reshape(-1, hidden), (bsz, seqlen, hidden)
+        raise RuntimeError(f"Unsupported hidden_states rank for Qwen3Moe experts: {x.ndim}")
 
-        router_logits = self.gate(hidden_states_flat)
-        routing_weights = torch.nn.functional.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        if self.norm_topk_prob:
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        routing_weights = routing_weights.to(hidden_states.dtype)
+    def _flatten_router(x: torch.Tensor, shape: tuple[int, ...] | None) -> torch.Tensor:
+        if shape is None:
+            return x
+        bsz, seqlen, _hidden = shape
+        return x.reshape(bsz * seqlen, x.shape[-1])
 
-        final_hidden_states = torch.zeros_like(
-            hidden_states_flat, dtype=hidden_states.dtype, device=hidden_states.device
-        )
+    def tiled_forward(
+        self: Any,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor | None = None,
+        top_k_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Fallback to upstream behavior for unexpected invocation patterns.
+        if top_k_index is None or top_k_weights is None:
+            return original_forward(self, hidden_states, top_k_index, top_k_weights)
 
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts, num_classes=self.num_experts
-        ).permute(2, 1, 0)
-        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero(as_tuple=False).flatten()
+        hidden_flat, restore_shape = _flatten_tokens(hidden_states)
+        top_k_index_flat = _flatten_router(top_k_index, restore_shape)
+        top_k_weights_flat = _flatten_router(top_k_weights, restore_shape)
+
+        final_hidden_states = torch.zeros_like(hidden_flat)
+
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index_flat, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero(as_tuple=False).flatten()
 
         for expert_idx_t in expert_hit:
             expert_idx = int(expert_idx_t.item())
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx])
-            if top_x.numel() == 0:
+            if expert_idx == self.num_experts:
                 continue
 
-            chunk_size = max(1, (top_x.numel() + num_shards - 1) // num_shards)
-            for start in range(0, top_x.numel(), chunk_size):
-                end = min(start + chunk_size, top_x.numel())
-                tok = top_x[start:end]
-                pos = idx[start:end]
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            if token_idx.numel() == 0:
+                continue
 
-                current_state = hidden_states_flat[tok]
-                current_hidden_states = expert_layer(current_state) * routing_weights[tok, pos, None]
-                final_hidden_states.index_add_(0, tok, current_hidden_states.to(hidden_states.dtype))
+            chunk_size = max(1, (token_idx.numel() + num_shards - 1) // num_shards)
+            for start in range(0, token_idx.numel(), chunk_size):
+                end = min(start + chunk_size, token_idx.numel())
+                tok = token_idx[start:end]
+                pos = top_k_pos[start:end]
 
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+                current_state = hidden_flat[tok]
+                gate, up = torch.nn.functional.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+                current_hidden_states = self.act_fn(gate) * up
+                current_hidden_states = torch.nn.functional.linear(current_hidden_states, self.down_proj[expert_idx])
+                current_hidden_states = current_hidden_states * top_k_weights_flat[tok, pos, None]
+                final_hidden_states.index_add_(0, tok, current_hidden_states.to(final_hidden_states.dtype))
 
-    block_class.forward = tiled_forward
+        if restore_shape is None:
+            return final_hidden_states
+
+        bsz, seqlen, hidden = restore_shape
+        return final_hidden_states.reshape(bsz, seqlen, hidden)
+
+    experts_class.forward = tiled_forward
 
 
 def apply_tiled_mlp_monkey_patch(
@@ -358,10 +399,20 @@ def apply_tiled_mlp_monkey_patch(
 
             if mtype == "qwen3_moe":
                 module = importlib.import_module("transformers.models.qwen3_moe.modeling_qwen3_moe")
-                block_class = getattr(module, "Qwen3MoeSparseMoeBlock")
-                _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
-                if "Qwen3MoeSparseMoeBlock" not in patched_classes:
-                    patched_classes.append("Qwen3MoeSparseMoeBlock")
+                # Newer transformers: packed expert weights in Qwen3MoeExperts.
+                if hasattr(module, "Qwen3MoeExperts"):
+                    experts_class = getattr(module, "Qwen3MoeExperts")
+                    _patch_qwen3_moe_experts_class(experts_class, num_shards)
+                    if "Qwen3MoeExperts" not in patched_classes:
+                        patched_classes.append("Qwen3MoeExperts")
+                # Older/community variants: experts are Qwen3MoeMLP modules.
+                elif hasattr(module, "Qwen3MoeMLP"):
+                    mlp_class = getattr(module, "Qwen3MoeMLP")
+                    _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
+                    if "Qwen3MoeMLP" not in patched_classes:
+                        patched_classes.append("Qwen3MoeMLP")
+                else:
+                    raise AttributeError("Neither Qwen3MoeExperts nor Qwen3MoeMLP found")
                 continue
 
             module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
