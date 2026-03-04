@@ -209,89 +209,96 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             if use_critic
             else {}
         ),
-        # response length
-        "response_length/mean": torch.mean(response_length).detach().item(),
-        "response_length/max": torch.max(response_length).detach().item(),
-        "response_length/min": torch.min(response_length).detach().item(),
-        "response_length/clip_ratio": torch.mean(torch.eq(response_length, max_response_length).float())
+        # rollout lengths
+        "rollout_lengths/response/mean": torch.mean(response_length).detach().item(),
+        "rollout_lengths/response/max": torch.max(response_length).detach().item(),
+        "rollout_lengths/response/min": torch.min(response_length).detach().item(),
+        "rollout_lengths/response/clip_ratio": torch.mean(torch.eq(response_length, max_response_length).float())
         .detach()
         .item(),
         # response length (non-aborted only)
         # These statistics exclude aborted samples to avoid skew from zeros
-        "response_length_non_aborted/mean": non_aborted_response_length_mean,
-        "response_length_non_aborted/max": non_aborted_response_length_max,
-        "response_length_non_aborted/min": non_aborted_response_length_min,
-        "response_length_non_aborted/clip_ratio": non_aborted_response_length_clip_ratio,
+        "rollout_lengths/response_non_aborted/mean": non_aborted_response_length_mean,
+        "rollout_lengths/response_non_aborted/max": non_aborted_response_length_max,
+        "rollout_lengths/response_non_aborted/min": non_aborted_response_length_min,
+        "rollout_lengths/response_non_aborted/clip_ratio": non_aborted_response_length_clip_ratio,
         # response length: LLM-generated vs tool output
-        "response_length_llm/mean": torch.mean(response_length_llm).detach().item(),
-        "response_length_llm/max": torch.max(response_length_llm).detach().item(),
-        "response_length_llm/min": torch.min(response_length_llm).detach().item(),
-        "response_length_tool/mean": torch.mean(response_length_tool).detach().item(),
-        "response_length_tool/max": torch.max(response_length_tool).detach().item(),
-        "response_length_tool/min": torch.min(response_length_tool).detach().item(),
+        "rollout_lengths/response_llm/mean": torch.mean(response_length_llm).detach().item(),
+        "rollout_lengths/response_llm/max": torch.max(response_length_llm).detach().item(),
+        "rollout_lengths/response_llm/min": torch.min(response_length_llm).detach().item(),
+        "rollout_lengths/response_non_llm/mean": torch.mean(response_length_tool).detach().item(),
+        "rollout_lengths/response_non_llm/max": torch.max(response_length_tool).detach().item(),
+        "rollout_lengths/response_non_llm/min": torch.min(response_length_tool).detach().item(),
         # total rollout length (prompt + response)
-        "total_rollout_length/mean": total_rollout_length.mean().item(),
-        "total_rollout_length/max": total_rollout_length.max().item(),
-        "total_rollout_length/min": total_rollout_length.min().item(),
+        "rollout_lengths/total/mean": total_rollout_length.mean().item(),
+        "rollout_lengths/total/max": total_rollout_length.max().item(),
+        "rollout_lengths/total/min": total_rollout_length.min().item(),
         # aborted ratio
         # Fraction of samples whose response length is zero
-        "response/aborted_ratio": aborted_ratio,
+        "rollout_lengths/aborted_ratio": aborted_ratio,
         # prompt length
-        "prompt_length/mean": torch.mean(prompt_length).detach().item(),
-        "prompt_length/max": torch.max(prompt_length).detach().item(),
-        "prompt_length/min": torch.min(prompt_length).detach().item(),
-        "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        "rollout_lengths/prompt/mean": torch.mean(prompt_length).detach().item(),
+        "rollout_lengths/prompt/max": torch.max(prompt_length).detach().item(),
+        "rollout_lengths/prompt/min": torch.min(prompt_length).detach().item(),
+        "rollout_lengths/prompt/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
 
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
         num_turns = batch.non_tensor_batch["__num_turns__"]
-        metrics["num_turns/min"] = num_turns.min()
-        metrics["num_turns/max"] = num_turns.max()
-        metrics["num_turns/mean"] = num_turns.mean()
+        metrics["rollout_lengths/num_turns/min"] = num_turns.min()
+        metrics["rollout_lengths/num_turns/max"] = num_turns.max()
+        metrics["rollout_lengths/num_turns/mean"] = num_turns.mean()
 
+    tool_call_counts = None
     if "tool_call_counts" in batch.non_tensor_batch:
         tool_call_counts = batch.non_tensor_batch["tool_call_counts"]
-        metrics["rollout_diag/tool_call_counts/min"] = tool_call_counts.min()
-        metrics["rollout_diag/tool_call_counts/max"] = tool_call_counts.max()
-        metrics["rollout_diag/tool_call_counts/mean"] = tool_call_counts.mean()
+        if np.asarray(tool_call_counts).max() > 0:
+            metrics["rollout_breakdown/tool_call_counts/min"] = tool_call_counts.min()
+            metrics["rollout_breakdown/tool_call_counts/max"] = tool_call_counts.max()
+            metrics["rollout_breakdown/tool_call_counts/mean"] = tool_call_counts.mean()
 
-    _add_non_tensor_scalar_stats(metrics, batch, "assistant_tokens_total", "rollout_diag/assistant_tokens_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_total", "rollout_diag/tool_tokens_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_raw_total", "rollout_diag/tool_tokens_raw_total")
-    _add_non_tensor_scalar_stats(metrics, batch, "interaction_tokens_total", "rollout_diag/interaction_tokens_total")
     _add_non_tensor_scalar_stats(
-        metrics, batch, "interaction_tokens_raw_total", "rollout_diag/interaction_tokens_raw_total"
+        metrics, batch, "assistant_tokens_total", "rollout_breakdown/assistant_tokens_total"
+    )
+    _add_non_tensor_scalar_stats(
+        metrics, batch, "interaction_tokens_total", "rollout_breakdown/interaction_tokens_total"
+    )
+    _add_non_tensor_scalar_stats(
+        metrics, batch, "interaction_tokens_raw_total", "rollout_breakdown/interaction_tokens_raw_total"
     )
     _add_non_tensor_scalar_stats(
         metrics,
         batch,
         "max_prompt_tokens_before_generate",
-        "rollout_diag/max_prompt_tokens_before_generate",
+        "rollout_breakdown/max_prompt_tokens_before_generate",
     )
     _add_non_tensor_scalar_stats(
         metrics,
         batch,
         "max_assistant_turn_tokens",
-        "rollout_diag/max_assistant_turn_tokens",
+        "rollout_breakdown/max_assistant_turn_tokens",
     )
-    _add_non_tensor_scalar_stats(metrics, batch, "max_tool_turn_tokens", "rollout_diag/max_tool_turn_tokens")
     _add_non_tensor_scalar_stats(
-        metrics,
-        batch,
-        "max_interaction_turn_tokens",
-        "rollout_diag/max_interaction_turn_tokens",
+        metrics, batch, "max_interaction_turn_tokens", "rollout_breakdown/max_interaction_turn_tokens"
     )
 
-    if "tool_tokens_total" in batch.non_tensor_batch and "interaction_tokens_total" in batch.non_tensor_batch:
+    # Tool-specific diagnostics are only useful when tools are actually called.
+    has_tool_activity = tool_call_counts is not None and np.asarray(tool_call_counts).max() > 0
+    if has_tool_activity:
+        _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_total", "rollout_breakdown/tool_tokens_total")
+        _add_non_tensor_scalar_stats(metrics, batch, "tool_tokens_raw_total", "rollout_breakdown/tool_tokens_raw_total")
+        _add_non_tensor_scalar_stats(metrics, batch, "max_tool_turn_tokens", "rollout_breakdown/max_tool_turn_tokens")
+
+    if has_tool_activity and "tool_tokens_total" in batch.non_tensor_batch and "interaction_tokens_total" in batch.non_tensor_batch:
         tool_and_interaction = torch.from_numpy(
             np.asarray(batch.non_tensor_batch["tool_tokens_total"], dtype=np.float32)
             + np.asarray(batch.non_tensor_batch["interaction_tokens_total"], dtype=np.float32)
         )
         response_tool_gap = torch.abs(response_length_tool - tool_and_interaction)
-        metrics["rollout_diag/response_length_tool_breakdown_abs_error/mean"] = response_tool_gap.mean().item()
-        metrics["rollout_diag/response_length_tool_breakdown_abs_error/max"] = response_tool_gap.max().item()
-        metrics["rollout_diag/response_length_tool_breakdown_abs_error/min"] = response_tool_gap.min().item()
+        metrics["rollout_breakdown/response_non_llm_breakdown_abs_error/mean"] = response_tool_gap.mean().item()
+        metrics["rollout_breakdown/response_non_llm_breakdown_abs_error/max"] = response_tool_gap.max().item()
+        metrics["rollout_breakdown/response_non_llm_breakdown_abs_error/min"] = response_tool_gap.min().item()
 
     return metrics
 
