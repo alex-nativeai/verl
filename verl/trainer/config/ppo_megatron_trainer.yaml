@@ -154,6 +154,13 @@ trainer:
   del_local_ckpt_after_load: False
   val_before_train: True
   test_freq: -1
+  validation_custom_metrics:
+    enable: false
+    target_var: acc
+    selector_score_key: null
+    judge_metric_name: judge
+    diversity_keys: null
+    pass_threshold: 0.5
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

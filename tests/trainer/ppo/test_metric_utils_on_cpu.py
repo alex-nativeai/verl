@@ -25,6 +25,7 @@ from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
     compute_data_metrics,
+    process_grouped_validation_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -540,6 +541,68 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
+
+
+class TestProcessGroupedValidationMetrics(unittest.TestCase):
+    """Tests for grouped validation metrics used by sampled validation."""
+
+    def test_grouped_metrics_with_selector_and_diversity(self):
+        data_sources = ["source1"] * 7
+        sample_uids = ["uid1"] * 7
+        infos_dict = {
+            "acc": [1, 0, 0, 1, 0, 1, 0],
+            "selector_score": [0.1, 0.2, 0.3, 0.95, 0.4, 0.5, 0.6],
+            "executed_query": [
+                "SELECT * FROM t",
+                "SELECT id FROM t",
+                "SELECT id FROM t",
+                "SELECT name FROM t",
+                "SELECT * FROM t",
+                "SELECT age FROM t",
+                "SELECT age FROM t",
+            ],
+        }
+
+        result = process_grouped_validation_metrics(
+            data_sources=data_sources,
+            sample_uids=sample_uids,
+            infos_dict=infos_dict,
+            target_var="acc",
+            selector_score_key="selector_score",
+            diversity_keys=["executed_query"],
+            judge_metric_name="judge",
+            pass_threshold=0.5,
+        )
+
+        self.assertIn("source1", result)
+        self.assertIn("acc", result["source1"])
+        self.assertIn("executed_query", result["source1"])
+
+        self.assertAlmostEqual(result["source1"]["acc"]["judge@7"], 1.0, places=6)
+        self.assertAlmostEqual(result["source1"]["executed_query"]["unique@7/mean"], 4.0, places=6)
+        self.assertAlmostEqual(result["source1"]["executed_query"]["unique_ratio@7/mean"], 4.0 / 7.0, places=6)
+
+    def test_grouped_metrics_auto_detect_diversity_keys(self):
+        data_sources = ["source1", "source1"]
+        sample_uids = ["uid1", "uid1"]
+        infos_dict = {
+            "acc": [1, 0],
+            "pred_sql": ["SELECT 1", "SELECT 2"],
+        }
+
+        result = process_grouped_validation_metrics(
+            data_sources=data_sources,
+            sample_uids=sample_uids,
+            infos_dict=infos_dict,
+            target_var="acc",
+            selector_score_key=None,
+            diversity_keys=None,
+            judge_metric_name="judge",
+            pass_threshold=0.5,
+        )
+
+        self.assertIn("pred_sql", result["source1"])
+        self.assertAlmostEqual(result["source1"]["pred_sql"]["unique@2/mean"], 2.0, places=6)
 
 
 if __name__ == "__main__":

@@ -178,6 +178,24 @@ trainer:
   # Validation frequency (in training iterations)
   test_freq: -1
 
+  # Optional grouped validation metrics for sampled validation.
+  # These are computed over repeated responses per prompt uid.
+  validation_custom_metrics:
+    # Master switch for grouped custom validation metrics.
+    enable: false
+    # Binary correctness field in reward_extra_info used for judge/pass metrics.
+    target_var: acc
+    # Optional score used to pick one candidate among k (argmax per prompt).
+    # When set, logs judge@k.
+    selector_score_key: null
+    # Metric prefix for selector metric.
+    judge_metric_name: judge
+    # Optional list of keys used for diversity metrics.
+    # If null, non-numeric reward_extra_info keys are auto-detected.
+    diversity_keys: null
+    # Threshold to convert target_var to pass/fail.
+    pass_threshold: 0.5
+
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0
 

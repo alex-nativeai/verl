@@ -44,6 +44,7 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
+    process_grouped_validation_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
@@ -644,6 +645,29 @@ class RayPPOTrainer:
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+
+        custom_val_cfg = self.config.trainer.get("validation_custom_metrics", {}) or {}
+        if custom_val_cfg.get("enable", False):
+            target_var = custom_val_cfg.get("target_var", "acc" if "acc" in reward_extra_infos_dict else "reward")
+            selector_score_key = custom_val_cfg.get("selector_score_key", None)
+            diversity_keys = custom_val_cfg.get("diversity_keys", None)
+            judge_metric_name = custom_val_cfg.get("judge_metric_name", "judge")
+            pass_threshold = custom_val_cfg.get("pass_threshold", 0.5)
+
+            grouped_metrics = process_grouped_validation_metrics(
+                data_sources=data_sources,
+                sample_uids=sample_uids,
+                infos_dict=reward_extra_infos_dict,
+                target_var=target_var,
+                selector_score_key=selector_score_key,
+                diversity_keys=diversity_keys,
+                judge_metric_name=judge_metric_name,
+                pass_threshold=pass_threshold,
+            )
+            for data_source, var2metric2val in grouped_metrics.items():
+                for var_name, metric2val in var2metric2val.items():
+                    data_src2var2metric2val[data_source][var_name].update(metric2val)
+
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -652,7 +676,10 @@ class RayPPOTrainer:
                 for metric_name, metric_val in metric2val.items():
                     if (
                         (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and any(
+                            metric_name.startswith(pfx)
+                            for pfx in ["mean", "maj", "best", "judge@"]
+                        )
                         and (f"@{n_max}" in metric_name)
                     ):
                         metric_sec = "val-core"

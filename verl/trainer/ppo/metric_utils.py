@@ -15,6 +15,7 @@
 Metrics related to the PPO trainer.
 """
 
+import json
 from collections import defaultdict
 from functools import partial
 from typing import Any, Callable
@@ -734,4 +735,135 @@ def process_validation_metrics(
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
+    return data_src2var2metric2val
+
+
+def _is_numeric_scalar(value: Any) -> bool:
+    if isinstance(value, (list, tuple, set, dict, np.ndarray)):
+        return False
+    return isinstance(value, (int, float, bool, np.number))
+
+
+def _normalize_for_uniqueness(value: Any) -> str:
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return json.dumps({"type": type(value).__name__, "value": value}, sort_keys=True, ensure_ascii=True)
+
+    try:
+        normalized_value = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str)
+    except TypeError:
+        normalized_value = str(value)
+    return f"{type(value).__name__}:{normalized_value}"
+
+
+def process_grouped_validation_metrics(
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+    target_var: str = "acc",
+    selector_score_key: str | None = None,
+    diversity_keys: list[str] | None = None,
+    judge_metric_name: str = "judge",
+    pass_threshold: float = 0.5,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """
+    Compute exact prompt-grouped validation metrics from sampled candidates.
+
+    For each (data_source, uid) group, this function computes:
+    1. Judge metric:
+       - judge@k (customizable prefix): pass rate of candidate selected by max selector score
+    2. Diversity metrics for configured keys: unique count and unique ratio over k candidates
+    """
+    # Group by data source, prompt uid and variable.
+    data_src2uid2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for sample_idx, data_source in enumerate(data_sources):
+        uid = sample_uids[sample_idx]
+        for var_name, var_vals in infos_dict.items():
+            if sample_idx < len(var_vals):
+                data_src2uid2var2vals[data_source][uid][var_name].append(var_vals[sample_idx])
+
+    # Auto-detect diversity keys from non-numeric fields if not provided.
+    if diversity_keys is None:
+        diversity_keys = []
+        for key, values in infos_dict.items():
+            if values and not _is_numeric_scalar(values[0]):
+                diversity_keys.append(key)
+
+    data_src2var2metric2val = defaultdict(lambda: defaultdict(dict))
+
+    for data_source, uid2var2vals in data_src2uid2var2vals.items():
+        # Judge metric (computed from target_var + selector_score_key).
+        selected_pass_vals = []
+        target_group_sizes = []
+
+        for var2vals in uid2var2vals.values():
+            target_vals = var2vals.get(target_var, [])
+            if not target_vals or not _is_numeric_scalar(target_vals[0]):
+                continue
+
+            target_arr = np.asarray(target_vals, dtype=np.float32)
+            pass_flags = (target_arr > pass_threshold).astype(np.float32)
+            target_group_sizes.append(len(target_arr))
+
+            if selector_score_key:
+                selector_vals = var2vals.get(selector_score_key, [])
+                if (
+                    selector_vals
+                    and len(selector_vals) == len(target_vals)
+                    and _is_numeric_scalar(selector_vals[0])
+                ):
+                    selector_arr = np.asarray(selector_vals, dtype=np.float32)
+                    selected_idx = int(np.argmax(selector_arr))
+                    selected_pass_vals.append(float(pass_flags[selected_idx]))
+
+        if target_group_sizes:
+            # Validation repeat count should be fixed; if not, use max group size for metric naming.
+            k = (
+                target_group_sizes[0]
+                if len(set(target_group_sizes)) == 1
+                else int(max(target_group_sizes))
+            )
+
+            if selected_pass_vals:
+                data_src2var2metric2val[data_source][target_var][f"{judge_metric_name}@{k}"] = float(
+                    np.mean(selected_pass_vals)
+                )
+
+        # Diversity metrics.
+        for diversity_key in diversity_keys:
+            unique_count_vals = []
+            unique_ratio_vals = []
+            diversity_group_sizes = []
+
+            for var2vals in uid2var2vals.values():
+                diversity_vals = var2vals.get(diversity_key, [])
+                if not diversity_vals:
+                    continue
+
+                diversity_group_sizes.append(len(diversity_vals))
+                unique_count = len({_normalize_for_uniqueness(value) for value in diversity_vals})
+                unique_count_vals.append(float(unique_count))
+                unique_ratio_vals.append(float(unique_count / max(len(diversity_vals), 1)))
+
+            if unique_count_vals:
+                k = (
+                    diversity_group_sizes[0]
+                    if len(set(diversity_group_sizes)) == 1
+                    else int(max(diversity_group_sizes))
+                )
+                data_src2var2metric2val[data_source][diversity_key][f"unique@{k}/mean"] = float(
+                    np.mean(unique_count_vals)
+                )
+                data_src2var2metric2val[data_source][diversity_key][f"unique@{k}/min"] = float(
+                    np.min(unique_count_vals)
+                )
+                data_src2var2metric2val[data_source][diversity_key][f"unique@{k}/max"] = float(
+                    np.max(unique_count_vals)
+                )
+                data_src2var2metric2val[data_source][diversity_key][f"unique_ratio@{k}/mean"] = float(
+                    np.mean(unique_ratio_vals)
+                )
+
     return data_src2var2metric2val
