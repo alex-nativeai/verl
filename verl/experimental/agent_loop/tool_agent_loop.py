@@ -287,6 +287,9 @@ class ToolAgentLoop(AgentLoopBase):
         if parse_errors and not agent_data.tool_calls:
             return await self._handle_tool_call_parse_errors(agent_data, parse_errors)
 
+        if len(agent_data.tool_calls) > self.max_parallel_calls:
+            return await self._handle_excess_tool_calls(agent_data)
+
         # Handle interaction if needed
         if self.interaction_config_file:
             assistant_message = await self.loop.run_in_executor(
@@ -311,6 +314,29 @@ class ToolAgentLoop(AgentLoopBase):
             "Please output exactly one valid <tool_call> block with strict JSON and no extra text inside it.\n"
             f"Parser error(s): {error_feedback}"
         )
+        return await self._append_user_feedback_message(agent_data, user_feedback)
+
+    async def _handle_excess_tool_calls(self, agent_data: AgentData) -> AgentState:
+        """Append feedback when the model emits more tool calls than allowed in one turn."""
+        requested_calls = len(agent_data.tool_calls)
+        max_allowed_calls = self.max_parallel_calls
+        logger.warning(
+            "Model emitted %d tool calls in a single turn, but max_parallel_calls=%d. "
+            "Requesting model retry with fewer tool calls.",
+            requested_calls,
+            max_allowed_calls,
+        )
+        agent_data.metrics["tool_call_limit_violations"] = agent_data.metrics.get("tool_call_limit_violations", 0) + 1
+
+        user_feedback = (
+            f"You requested {requested_calls} tool calls in one assistant turn, "
+            f"but this environment allows at most {max_allowed_calls} per turn. "
+            f"Please retry with no more than {max_allowed_calls} <tool_call> block(s) in your next response."
+        )
+        return await self._append_user_feedback_message(agent_data, user_feedback)
+
+    async def _append_user_feedback_message(self, agent_data: AgentData, user_feedback: str) -> AgentState:
+        """Append user feedback to the chat template and continue generation if budget allows."""
         add_messages: list[dict[str, Any]] = [{"role": "user", "content": user_feedback}]
         agent_data.messages.extend(add_messages)
 
@@ -318,8 +344,8 @@ class ToolAgentLoop(AgentLoopBase):
             add_messages,
             remove_system_prompt=True,
         )
-        parse_error_tokens_raw = len(response_ids)
-        agent_data.interaction_tokens_raw_per_turn.append(parse_error_tokens_raw)
+        feedback_tokens_raw = len(response_ids)
+        agent_data.interaction_tokens_raw_per_turn.append(feedback_tokens_raw)
 
         remaining_response_tokens = self.response_length - len(agent_data.response_mask)
         if remaining_response_tokens <= 0:

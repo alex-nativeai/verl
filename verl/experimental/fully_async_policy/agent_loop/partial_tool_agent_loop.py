@@ -225,6 +225,9 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         if parse_errors and not agent_data.tool_calls:
             return await self._handle_tool_call_parse_errors(agent_data, parse_errors)
 
+        if len(agent_data.tool_calls) > self.max_parallel_calls:
+            return await self._handle_excess_tool_calls(agent_data)
+
         # Handle interaction if needed
         if self.interaction_config_file:
             assistant_message = await self.loop.run_in_executor(
