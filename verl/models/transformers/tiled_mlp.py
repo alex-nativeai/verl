@@ -165,12 +165,24 @@ def _mlp_forward_fn(module, x):
 # Monkey Patch Functions
 # ============================================================================
 
-# Model type to MLP class mapping
+# Model type to MLP class mapping.
+# Values can be either:
+#   - a single (module_path, class_name) tuple
+#   - a tuple of candidate (module_path, class_name) tuples (for aliases / version variants)
 _MODEL_TYPE_TO_MLP_CLASS = {
     "llama": ("transformers.models.llama.modeling_llama", "LlamaMLP"),
     "qwen2": ("transformers.models.qwen2.modeling_qwen2", "Qwen2MLP"),
     "qwen2_5": ("transformers.models.qwen2.modeling_qwen2", "Qwen2MLP"),  # Qwen2.5 uses Qwen2 MLP
     "qwen3": ("transformers.models.qwen3.modeling_qwen3", "Qwen3MLP"),
+    # Qwen3.5 may appear under dedicated modules/classes across transformers versions.
+    # Try likely qwen3_5 variants first, then fallback to qwen3-compatible MLP.
+    "qwen3_5": (
+        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5MLP"),
+        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3p5MLP"),
+        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen35MLP"),
+        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3MLP"),
+        ("transformers.models.qwen3.modeling_qwen3", "Qwen3MLP"),
+    ),
 }
 
 
@@ -399,6 +411,75 @@ def _patch_qwen3_moe_experts_class(experts_class: type[nn.Module], num_shards: i
     experts_class.forward = tiled_forward
 
 
+def _patch_qwen3_moe_family(
+    model_type: str,
+    num_shards: int,
+    import_module_fn,
+    patched_classes: list[str],
+):
+    """Patch Qwen3/Qwen3.5 MoE experts across transformers layout variants."""
+    module_candidates = {
+        "qwen3_moe": ["transformers.models.qwen3_moe.modeling_qwen3_moe"],
+        "qwen3_5_moe": [
+            "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe",
+            "transformers.models.qwen3_moe.modeling_qwen3_moe",
+        ],
+    }[model_type]
+
+    module = None
+    last_import_error = None
+    for module_path in module_candidates:
+        try:
+            module = import_module_fn(module_path)
+            break
+        except ImportError as e:
+            last_import_error = e
+
+    if module is None:
+        raise ImportError(
+            f"Could not import {model_type} module. Tried {module_candidates}. Last error: {last_import_error}"
+        ) from last_import_error
+
+    # Prefer packed experts when available (newer transformers).
+    for class_name in ("Qwen3_5MoeExperts", "Qwen3MoeExperts"):
+        if hasattr(module, class_name):
+            if class_name in patched_classes:
+                return
+            experts_class = getattr(module, class_name)
+            _patch_qwen3_moe_experts_class(experts_class, num_shards)
+            if class_name not in patched_classes:
+                patched_classes.append(class_name)
+            return
+
+    # Fallback to per-expert MLP patch for older/community variants.
+    for class_name in ("Qwen3_5MoeMLP", "Qwen3MoeMLP"):
+        if hasattr(module, class_name):
+            if class_name in patched_classes:
+                return
+            mlp_class = getattr(module, class_name)
+            _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
+            if class_name not in patched_classes:
+                patched_classes.append(class_name)
+            return
+
+    # Last-resort fallback for very old forks that expose sparse block only.
+    for class_name in ("Qwen3_5MoeSparseMoeBlock", "Qwen3MoeSparseMoeBlock"):
+        if hasattr(module, class_name):
+            if class_name in patched_classes:
+                return
+            block_class = getattr(module, class_name)
+            _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
+            if class_name not in patched_classes:
+                patched_classes.append(class_name)
+            return
+
+    raise AttributeError(
+        f"Could not find {model_type} patch target in module {module.__name__}. Expected one of "
+        "Qwen3_5MoeExperts/Qwen3MoeExperts, Qwen3_5MoeMLP/Qwen3MoeMLP, "
+        "Qwen3_5MoeSparseMoeBlock/Qwen3MoeSparseMoeBlock."
+    )
+
+
 def apply_tiled_mlp_monkey_patch(
     num_shards: int = 4,
     model_type: Optional[str] = None,
@@ -419,15 +500,15 @@ def apply_tiled_mlp_monkey_patch(
         List of patched class names.
     """
     if model_type is None:
-        types_to_patch = [*list(_MODEL_TYPE_TO_MLP_CLASS.keys()), "gpt_oss", "qwen3_moe"]
-    elif model_type in ("gpt_oss", "qwen3_moe"):
+        types_to_patch = [*list(_MODEL_TYPE_TO_MLP_CLASS.keys()), "gpt_oss", "qwen3_moe", "qwen3_5_moe"]
+    elif model_type in ("gpt_oss", "qwen3_moe", "qwen3_5_moe"):
         types_to_patch = [model_type]
     elif model_type in _MODEL_TYPE_TO_MLP_CLASS:
         types_to_patch = [model_type]
     else:
         raise ValueError(
             f"TiledMLP does not support model_type='{model_type}'. "
-            f"Supported types: {list(_MODEL_TYPE_TO_MLP_CLASS.keys())}, gpt_oss, qwen3_moe. "
+            f"Supported types: {list(_MODEL_TYPE_TO_MLP_CLASS.keys())}, gpt_oss, qwen3_moe, qwen3_5_moe. "
             f"For SwiGLU-style MLPs, you can add support by extending _MODEL_TYPE_TO_MLP_CLASS "
             f"in verl/models/transformers/tiled_mlp.py"
         )
@@ -446,39 +527,33 @@ def apply_tiled_mlp_monkey_patch(
                     patched_classes.append("GptOssExperts")
                 continue
 
-            if mtype == "qwen3_moe":
-                module = importlib.import_module("transformers.models.qwen3_moe.modeling_qwen3_moe")
-                # Prefer patching packed experts when available (newer transformers).
-                if hasattr(module, "Qwen3MoeExperts"):
-                    experts_class = getattr(module, "Qwen3MoeExperts")
-                    _patch_qwen3_moe_experts_class(experts_class, num_shards)
-                    if "Qwen3MoeExperts" not in patched_classes:
-                        patched_classes.append("Qwen3MoeExperts")
-                # Fallback to per-expert MLP patch for older/community variants.
-                elif hasattr(module, "Qwen3MoeMLP"):
-                    mlp_class = getattr(module, "Qwen3MoeMLP")
-                    _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
-                    if "Qwen3MoeMLP" not in patched_classes:
-                        patched_classes.append("Qwen3MoeMLP")
-                # Last-resort fallback for very old forks that expose sparse block only.
-                elif hasattr(module, "Qwen3MoeSparseMoeBlock"):
-                    block_class = getattr(module, "Qwen3MoeSparseMoeBlock")
-                    _patch_qwen3_moe_sparse_moe_block(block_class, num_shards)
-                    if "Qwen3MoeSparseMoeBlock" not in patched_classes:
-                        patched_classes.append("Qwen3MoeSparseMoeBlock")
-                else:
-                    raise AttributeError(
-                        "Could not find Qwen3 MoE patch target. Expected one of "
-                        "Qwen3MoeExperts/Qwen3MoeMLP/Qwen3MoeSparseMoeBlock."
-                    )
+            if mtype in ("qwen3_moe", "qwen3_5_moe"):
+                _patch_qwen3_moe_family(
+                    model_type=mtype,
+                    num_shards=num_shards,
+                    import_module_fn=importlib.import_module,
+                    patched_classes=patched_classes,
+                )
                 continue
 
-            module_path, class_name = _MODEL_TYPE_TO_MLP_CLASS[mtype]
-            module = importlib.import_module(module_path)
-            mlp_class = getattr(module, class_name)
-            _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
-            if class_name not in patched_classes:
-                patched_classes.append(class_name)
+            patch_targets = _get_mlp_patch_targets(mtype)
+            last_error = None
+            for module_path, class_name in patch_targets:
+                try:
+                    module = importlib.import_module(module_path)
+                    mlp_class = getattr(module, class_name)
+                    _patch_mlp_class(mlp_class, _mlp_forward_fn, num_shards)
+                    if class_name not in patched_classes:
+                        patched_classes.append(class_name)
+                    last_error = None
+                    break
+                except (ImportError, AttributeError) as e:
+                    last_error = e
+
+            if last_error is not None:
+                raise AttributeError(
+                    f"Could not patch {mtype} MLP. Tried candidates: {patch_targets}. Last error: {last_error}"
+                ) from last_error
         except (ImportError, AttributeError) as e:
             print(f"Warning: Could not patch {mtype} MLP: {e}")
 
@@ -496,3 +571,16 @@ def _patch_mlp_class(mlp_class: type[nn.Module], forward_fn, num_shards: int):
         return TiledMLP.apply(forward_fn, self, x, num_shards, compute_params)
 
     mlp_class.forward = tiled_forward
+
+
+def _get_mlp_patch_targets(model_type: str) -> list[tuple[str, str]]:
+    """Normalize model->MLP mapping into an ordered candidate target list."""
+    targets = _MODEL_TYPE_TO_MLP_CLASS[model_type]
+    if (
+        isinstance(targets, tuple)
+        and len(targets) == 2
+        and isinstance(targets[0], str)
+        and isinstance(targets[1], str)
+    ):
+        return [targets]
+    return list(targets)
