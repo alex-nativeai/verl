@@ -258,6 +258,7 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
         remove_system_prompt: bool = False,
+        add_generation_prompt: bool = True,
     ):
         """Apply chat template to messages with optional tools, images, and videos.
 
@@ -267,6 +268,8 @@ class AgentLoopBase(ABC):
             images (list[Image.Image], optional): Input images. Defaults to None.
             videos (list[tuple[torch.Tensor, dict]], optional): Input videos. Defaults to None.
             remove_system_prompt (bool, optional): Whether to remove system prompt. Defaults to False.
+            add_generation_prompt (bool, optional): Whether to append assistant generation prompt.
+                Defaults to True.
 
         Returns:
             list[int]: Prompt token ids.
@@ -277,7 +280,7 @@ class AgentLoopBase(ABC):
                 lambda: self.processor.apply_chat_template(
                     messages,
                     tools=tools,
-                    add_generation_prompt=True,
+                    add_generation_prompt=add_generation_prompt,
                     tokenize=False,
                     **self.apply_chat_template_kwargs,
                 ),
@@ -305,7 +308,7 @@ class AgentLoopBase(ABC):
                 lambda: self.tokenizer.apply_chat_template(
                     messages,
                     tools=tools,
-                    add_generation_prompt=True,
+                    add_generation_prompt=add_generation_prompt,
                     tokenize=True,
                     **self.apply_chat_template_kwargs,
                 ),

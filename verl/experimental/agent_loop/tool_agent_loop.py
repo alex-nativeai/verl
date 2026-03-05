@@ -374,7 +374,9 @@ class ToolAgentLoop(AgentLoopBase):
 
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
-            tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            tool_response_text = build_gpt_oss_tool_response_text(
+                add_messages, tool_call_names, include_generation_prompt=not should_terminate_sequence
+            )
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
@@ -388,6 +390,7 @@ class ToolAgentLoop(AgentLoopBase):
                 images=images,
                 videos=videos,
                 remove_system_prompt=True,
+                add_generation_prompt=not should_terminate_sequence,
             )
 
         tool_tokens_raw = len(response_ids)

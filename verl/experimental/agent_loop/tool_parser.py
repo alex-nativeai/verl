@@ -82,6 +82,7 @@ class HermesToolParser(ToolParser):
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
+        self.think_regex = regex.compile(r"<think>.*?</think>", regex.DOTALL)
 
     @rollout_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
@@ -90,18 +91,35 @@ class HermesToolParser(ToolParser):
         if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
             return text, []
 
-        matches = self.tool_call_regex.findall(text)
+        think_spans = [(m.start(), m.end()) for m in self.think_regex.finditer(text)]
+
+        def _in_think(start_idx: int) -> bool:
+            return any(span_start <= start_idx < span_end for span_start, span_end in think_spans)
+
         function_calls = []
-        for match in matches:
+        extracted_spans: list[tuple[int, int]] = []
+        for match in self.tool_call_regex.finditer(text):
+            if _in_think(match.start()):
+                continue
             try:
-                function_call = json.loads(match)
+                function_call = json.loads(match.group(1))
                 name, arguments = function_call["name"], function_call["arguments"]
                 function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+                extracted_spans.append((match.start(), match.end()))
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
 
-        # remaining text exclude tool call tokens
-        content = self.tool_call_regex.sub("", text)
+        # remaining text excludes only extracted tool call tokens
+        if extracted_spans:
+            content_parts = []
+            cursor = 0
+            for span_start, span_end in extracted_spans:
+                content_parts.append(text[cursor:span_start])
+                cursor = span_end
+            content_parts.append(text[cursor:])
+            content = "".join(content_parts)
+        else:
+            content = text
 
         return content, function_calls
 
@@ -137,25 +155,38 @@ class GptOssToolParser(ToolParser):
         text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
         # Need to remove padding tokens for better tool call extraction.
         text = text.replace(self.tokenizer.pad_token, "")
-        # Need to reomve COT since COT may contain tool call tokens.But they are not valid tool calls.
-        text = regex.sub(self.cot_pattern, "", text)
-        text = regex.sub(self.partial_cot_pattern, "", text)
 
-        # check if there are tool calls in the text by re.findall
-        matches = regex.findall(self.tool_call_pattern, text)
-        if not matches:
-            return text, []
+        analysis_spans = [(m.start(), m.end()) for m in self.cot_pattern.finditer(text)]
+        analysis_spans.extend((m.start(), m.end()) for m in self.partial_cot_pattern.finditer(text))
+
+        def _in_analysis(start_idx: int) -> bool:
+            return any(span_start <= start_idx < span_end for span_start, span_end in analysis_spans)
 
         function_calls = []
-        for match in matches:
+        extracted_spans: list[tuple[int, int]] = []
+        for match in self.tool_call_pattern.finditer(text):
+            if _in_analysis(match.start()):
+                continue
             try:
-                name, arguments = match[0], match[1]
+                name, arguments = match.group(1), match.group(2)
                 # don't check if arguments is valid JSON and leave it to client
                 function_calls.append(FunctionCall(name=name, arguments=arguments))
+                extracted_spans.append((match.start(), match.end()))
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
 
-        # remaing text exclude tool call tokens
-        content = regex.sub(self.tool_call_pattern, "", text)
+        content_source = text
+        if extracted_spans:
+            content_parts = []
+            cursor = 0
+            for span_start, span_end in extracted_spans:
+                content_parts.append(content_source[cursor:span_start])
+                cursor = span_end
+            content_parts.append(content_source[cursor:])
+            content_source = "".join(content_parts)
+
+        # Need to remove COT since COT may contain non-executable tool call tokens.
+        content = regex.sub(self.cot_pattern, "", content_source)
+        content = regex.sub(self.partial_cot_pattern, "", content)
 
         return content, function_calls
