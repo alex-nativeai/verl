@@ -314,9 +314,13 @@ class ToolAgentLoop(AgentLoopBase):
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
 
+        should_terminate_sequence = any(
+            isinstance(name, str) and name.strip().lower() == "terminate" for name in tool_call_names
+        )
+
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
-        for tool_response, tool_reward, _ in responses:
+        for tool_response, tool_reward, tool_result in responses:
             # Create message from tool response
             if tool_response.image or tool_response.video:
                 # Multi-modal content with structured format
@@ -363,6 +367,8 @@ class ToolAgentLoop(AgentLoopBase):
 
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
+            if self._tool_result_requests_termination(tool_result):
+                should_terminate_sequence = True
 
         agent_data.messages.extend(add_messages)
 
@@ -405,6 +411,8 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * tool_tokens_raw
         agent_data.user_turns += 1
+        if should_terminate_sequence:
+            return AgentState.TERMINATED
         return AgentState.GENERATING
 
     async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
@@ -518,6 +526,37 @@ class ToolAgentLoop(AgentLoopBase):
                     tool_response_kwargs[attr_name] = attr_value
 
         return ToolResponse(**tool_response_kwargs), tool_reward, res
+
+    @staticmethod
+    def _is_truthy_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on", "terminated", "done", "stop", "finished"}
+        return False
+
+    @classmethod
+    def _tool_result_requests_termination(cls, tool_result: Any) -> bool:
+        if not isinstance(tool_result, dict):
+            return False
+
+        termination_flag_keys = ("should_terminate", "terminated", "is_terminated", "done", "stop")
+        for key in termination_flag_keys:
+            if cls._is_truthy_flag(tool_result.get(key)):
+                return True
+
+        finish_reason = tool_result.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason.strip().lower() in {
+            "terminate",
+            "terminated",
+            "done",
+            "stop",
+            "finished",
+        }:
+            return True
+        return False
 
     def _initialize_interactions(self, interaction_config_file):
         """Initialize interactions from configuration.
