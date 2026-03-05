@@ -18,6 +18,7 @@ import json
 import math
 import os
 from abc import ABC
+from collections.abc import Iterable
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from typing import cast
@@ -514,11 +515,8 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
         "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
     )
-
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
-        fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
-
-    assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
+    fsdp_transformer_layer_cls_to_wrap = _normalize_fsdp_wrap_layer_names(fsdp_transformer_layer_cls_to_wrap)
+    assert len(fsdp_transformer_layer_cls_to_wrap) > 0
 
     modules = []
     for name, module in model.named_modules():
@@ -537,6 +535,49 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     #     print(f"wrap module {model.__class__.__name__}")
     with maybe_patch_fsdp_module(model):
         fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
+
+
+def _normalize_fsdp_wrap_layer_names(layer_cls_to_wrap) -> set[str]:
+    """Normalize FSDP layer wrap config to a set of class names.
+
+    Accepts either a single string/class or an iterable of strings/classes.
+    """
+    if layer_cls_to_wrap is None:
+        raise ValueError(
+            "FSDP2 wrap policy requires non-empty 'transformer_layer_cls_to_wrap' "
+            "(or model._no_split_modules)."
+        )
+
+    if isinstance(layer_cls_to_wrap, (str, type)):
+        candidates = [layer_cls_to_wrap]
+    elif isinstance(layer_cls_to_wrap, Iterable):
+        candidates = list(layer_cls_to_wrap)
+    else:
+        raise TypeError(
+            "FSDP2 wrap policy 'transformer_layer_cls_to_wrap' must be a string/class "
+            f"or iterable of strings/classes, got {type(layer_cls_to_wrap)}"
+        )
+
+    normalized: set[str] = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, str):
+            if candidate:
+                normalized.add(candidate)
+            continue
+        if isinstance(candidate, type):
+            normalized.add(candidate.__name__)
+            continue
+        raise TypeError(
+            "Each FSDP2 wrap target must be a class name string or class type, "
+            f"got {type(candidate)} ({candidate!r})"
+        )
+
+    if not normalized:
+        raise ValueError("FSDP2 wrap policy resolved to no valid transformer layer class names.")
+
+    return normalized
 
 
 def get_shard_placement_fn(fsdp_size):

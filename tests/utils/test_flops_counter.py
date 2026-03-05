@@ -18,7 +18,18 @@ import pytest
 
 from verl.utils.flops_counter import FlopsCounter
 
-VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen3", "qwen3_moe", "deepseek_v3", "mistral", "gemma3_text", "apertus"}
+VALID_CONFIG_TYPE = {
+    "llama",
+    "qwen2",
+    "qwen3",
+    "qwen3_5",
+    "qwen3_moe",
+    "qwen3_5_moe",
+    "deepseek_v3",
+    "mistral",
+    "gemma3_text",
+    "apertus",
+}
 
 
 class Config:
@@ -88,6 +99,20 @@ CONFIG = {
         # 6*(4096*4096+4096*4096+4096*4096)*36*128*32
         "expected_flops_tuple": (180997438046208 / 1e12, 648394032807936 / 1e12),
     },
+    "qwen3_5": {
+        "config": {  # Alias coverage: qwen3_5 should reuse qwen3 FLOPs estimator
+            "model_type": "qwen3_5",
+            "vocab_size": 151936,
+            "hidden_size": 4096,
+            "intermediate_size": 12288,
+            "num_hidden_layers": 36,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        "expected_flops_tuple": (180997438046208 / 1e12, 648394032807936 / 1e12),
+    },
     "qwen3_moe": {
         "config": {  # Qwen/Qwen3-30B-A3B-Base
             "model_type": "qwen3_moe",
@@ -108,6 +133,22 @@ CONFIG = {
         # 6*(512*512+1024*1024+2048*2048)*48*128*32
         # 6*(151936*2048*2+48*(2048*(128*32+128*4*2+128*32)+2048*768*8*3+2048*128))*(4096+4096+4096) +
         # 6*(4096*4096+4096*4096+4096*4096)*48*128*32
+        "expected_flops_tuple": (78593069678592 / 1e12, 306570470621184 / 1e12),
+    },
+    "qwen3_5_moe": {
+        "config": {  # Alias coverage: qwen3_5_moe should reuse qwen3_moe FLOPs estimator
+            "model_type": "qwen3_5_moe",
+            "hidden_size": 2048,
+            "vocab_size": 151936,
+            "num_hidden_layers": 48,
+            "num_key_value_heads": 4,
+            "num_attention_heads": 32,
+            "head_dim": 128,
+            "moe_intermediate_size": 768,
+            "num_experts_per_tok": 8,
+            "num_experts": 128,
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
         "expected_flops_tuple": (78593069678592 / 1e12, 306570470621184 / 1e12),
     },
     "deepseek_v3": {
@@ -441,7 +482,9 @@ CONFIG = {
         "llama",
         "qwen2",
         "qwen3",
+        "qwen3_5",
         "qwen3_moe",
+        "qwen3_5_moe",
         "deepseek_v3",
         "mistral",
         "gemma3_text",
