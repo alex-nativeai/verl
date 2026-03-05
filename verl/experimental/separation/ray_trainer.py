@@ -636,11 +636,18 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
     def _fit_dump_data(self, batch: DataProto):
         timing_raw = self.timing_raw
+        reward_tensor = self.reward_tensor
         reward_extra_infos_dict = self.reward_extra_infos_dict
         # Log rollout generations if enabled
         rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-        if rollout_data_dir:
-            self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+        if rollout_data_dir and reward_tensor is not None:
+            self._log_rollout_data(
+                batch=batch,
+                reward_tensor=reward_tensor,
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                timing_raw=timing_raw,
+                rollout_data_dir=rollout_data_dir,
+            )
 
     def _fit_validate(self):
         metrics = self.metrics

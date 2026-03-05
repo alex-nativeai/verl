@@ -100,7 +100,7 @@ class HermesToolParser(ToolParser):
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
 
-        # remaing text exclude tool call tokens
+        # remaining text exclude tool call tokens
         content = self.tool_call_regex.sub("", text)
 
         return content, function_calls

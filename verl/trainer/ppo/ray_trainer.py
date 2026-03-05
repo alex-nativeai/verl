@@ -416,12 +416,81 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @staticmethod
+    def _to_serializable_list(values: Any) -> list[Any]:
+        if torch.is_tensor(values):
+            return values.detach().cpu().tolist()
+        if isinstance(values, np.ndarray):
+            return values.tolist()
+        if hasattr(values, "tolist"):
+            return values.tolist()
+        return list(values)
+
+    @staticmethod
+    def _collect_exact_rollout_fields(batch: DataProto) -> dict[str, list[Any]]:
+        prompts = batch.batch["prompts"].detach().cpu()
+        responses = batch.batch["responses"].detach().cpu()
+        attention_mask = batch.batch["attention_mask"].detach().cpu()
+
+        response_length = responses.size(1)
+        if response_length > 0:
+            prompt_attention_mask = attention_mask[:, :-response_length].to(torch.bool)
+            response_attention_mask = attention_mask[:, -response_length:].to(torch.bool)
+        else:
+            prompt_attention_mask = attention_mask.to(torch.bool)
+            response_attention_mask = attention_mask[:, :0].to(torch.bool)
+
+        if "response_mask" in batch.batch:
+            response_mask = batch.batch["response_mask"].detach().cpu().to(torch.bool)
+        else:
+            response_mask = response_attention_mask
+
+        prompt_token_ids = []
+        response_token_ids = []
+        response_token_ids_llm = []
+        for i in range(prompts.size(0)):
+            prompt_row = prompts[i]
+            response_row = responses[i]
+            prompt_token_ids.append(
+                [int(token) for token, keep in zip(prompt_row.tolist(), prompt_attention_mask[i].tolist(), strict=False) if keep]
+            )
+            response_token_ids.append(
+                [
+                    int(token)
+                    for token, keep in zip(response_row.tolist(), response_attention_mask[i].tolist(), strict=False)
+                    if keep
+                ]
+            )
+            response_token_ids_llm.append(
+                [int(token) for token, keep in zip(response_row.tolist(), response_mask[i].tolist(), strict=False) if keep]
+            )
+
+        return {
+            "prompt_token_ids": prompt_token_ids,
+            "response_token_ids": response_token_ids,
+            "response_token_ids_llm": response_token_ids_llm,
+            "prompt_token_ids_padded": prompts.tolist(),
+            "response_token_ids_padded": responses.tolist(),
+            "prompt_attention_mask": prompt_attention_mask.to(torch.int64).tolist(),
+            "response_attention_mask": response_attention_mask.to(torch.int64).tolist(),
+            "response_mask": response_mask.to(torch.int64).tolist(),
+            "prompt_length": prompt_attention_mask.sum(dim=-1).tolist(),
+            "response_length": response_attention_mask.sum(dim=-1).tolist(),
+            "response_length_llm": response_mask.sum(dim=-1).tolist(),
+        }
+
     def _log_rollout_data(
-        self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: dict,
+        timing_raw: dict,
+        rollout_data_dir: str,
     ):
         """Log rollout data to disk.
         Args:
             batch (DataProto): The batch containing rollout data
+            reward_tensor (torch.Tensor): Per-token reward tensor used for this training step
             reward_extra_infos_dict (dict): Additional reward information to log
             timing_raw (dict): Timing information for profiling
             rollout_data_dir (str): Directory path to save the rollout data
@@ -429,12 +498,25 @@ class RayPPOTrainer:
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+            scores = reward_tensor.sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            if "uid" in batch.non_tensor_batch:
+                reward_extra_infos_to_dump.setdefault("uid", self._to_serializable_list(batch.non_tensor_batch["uid"]))
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_to_dump.setdefault("request_id", batch.non_tensor_batch["request_id"].tolist())
+                reward_extra_infos_to_dump.setdefault(
+                    "request_id", self._to_serializable_list(batch.non_tensor_batch["request_id"])
+                )
+
+            exact_rollout_fields = self._collect_exact_rollout_fields(batch)
+            reward_extra_infos_to_dump.update(exact_rollout_fields)
+            reward_extra_infos_to_dump["input_with_special_tokens"] = self.tokenizer.batch_decode(
+                exact_rollout_fields["prompt_token_ids"], skip_special_tokens=False
+            )
+            reward_extra_infos_to_dump["output_with_special_tokens"] = self.tokenizer.batch_decode(
+                exact_rollout_fields["response_token_ids"], skip_special_tokens=False
+            )
 
             # Add rollout length diagnostics to dumped jsonl for offline analysis.
             rollout_diag_keys = [
@@ -459,7 +541,7 @@ class RayPPOTrainer:
                 if key in batch.non_tensor_batch:
                     values = batch.non_tensor_batch[key]
                     if len(values) == len(inputs):
-                        reward_extra_infos_to_dump[key] = values.tolist() if hasattr(values, "tolist") else list(values)
+                        reward_extra_infos_to_dump[key] = self._to_serializable_list(values)
 
             self._dump_generations(
                 inputs=inputs,
@@ -1590,7 +1672,13 @@ class RayPPOTrainer:
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        self._log_rollout_data(
+                            batch=batch,
+                            reward_tensor=reward_tensor,
+                            reward_extra_infos_dict=reward_extra_infos_dict,
+                            timing_raw=timing_raw,
+                            rollout_data_dir=rollout_data_dir,
+                        )
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (
