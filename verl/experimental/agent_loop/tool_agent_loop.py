@@ -281,7 +281,11 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        _, agent_data.tool_calls, parse_errors = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+
+        # If tool-call tags are present but malformed, feed back format errors and let model retry.
+        if parse_errors and not agent_data.tool_calls:
+            return await self._handle_tool_call_parse_errors(agent_data, parse_errors)
 
         # Handle interaction if needed
         if self.interaction_config_file:
@@ -298,6 +302,48 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.INTERACTING
         else:
             return AgentState.TERMINATED
+
+    async def _handle_tool_call_parse_errors(self, agent_data: AgentData, parse_errors: list[str]) -> AgentState:
+        """Append parse error feedback as a user message so the model can retry formatting."""
+        error_feedback = "\n".join(parse_errors[:3])
+        user_feedback = (
+            "Your previous <tool_call> payload could not be parsed as strict JSON. "
+            "Please output exactly one valid <tool_call> block with strict JSON and no extra text inside it.\n"
+            f"Parser error(s): {error_feedback}"
+        )
+        add_messages: list[dict[str, Any]] = [{"role": "user", "content": user_feedback}]
+        agent_data.messages.extend(add_messages)
+
+        response_ids = await self.apply_chat_template(
+            add_messages,
+            remove_system_prompt=True,
+        )
+        parse_error_tokens_raw = len(response_ids)
+        agent_data.interaction_tokens_raw_per_turn.append(parse_error_tokens_raw)
+
+        remaining_response_tokens = self.response_length - len(agent_data.response_mask)
+        if remaining_response_tokens <= 0:
+            agent_data.interaction_tokens_per_turn.append(0)
+            return AgentState.TERMINATED
+
+        if len(response_ids) > remaining_response_tokens:
+            response_ids = response_ids[:remaining_response_tokens]
+            force_terminate = True
+        else:
+            force_terminate = False
+
+        interaction_tokens_added = len(response_ids)
+        agent_data.interaction_tokens_per_turn.append(interaction_tokens_added)
+
+        agent_data.prompt_ids += response_ids
+        agent_data.response_mask += [0] * interaction_tokens_added
+        if agent_data.response_logprobs:
+            agent_data.response_logprobs += [0.0] * interaction_tokens_added
+        agent_data.user_turns += 1
+
+        if force_terminate or len(agent_data.response_mask) >= self.response_length:
+            return AgentState.TERMINATED
+        return AgentState.GENERATING
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""

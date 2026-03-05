@@ -46,14 +46,14 @@ class ToolParser(ABC):
         self.tokenizer = tokenizer
 
     @abstractmethod
-    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall], list[str]]:
         """Extract tool calls from the responses.
 
         Args:
             responses_ids (List[int]): The ids of the responses.
 
         Returns:
-            Tuple[str, List[FunctionCall]]: Content and extracted tool calls.
+            Tuple[str, List[FunctionCall], List[str]]: Content, extracted tool calls, and parse errors.
         """
         raise NotImplementedError
 
@@ -85,11 +85,11 @@ class HermesToolParser(ToolParser):
         self.think_regex = regex.compile(r"<think>.*?</think>", regex.DOTALL)
 
     @rollout_trace_op
-    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall], list[str]]:
         loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
         if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
-            return text, []
+            return text, [], []
 
         think_spans = [(m.start(), m.end()) for m in self.think_regex.finditer(text)]
 
@@ -97,6 +97,7 @@ class HermesToolParser(ToolParser):
             return any(span_start <= start_idx < span_end for span_start, span_end in think_spans)
 
         function_calls = []
+        parse_errors: list[str] = []
         extracted_spans: list[tuple[int, int]] = []
         for match in self.tool_call_regex.finditer(text):
             if _in_think(match.start()):
@@ -108,6 +109,8 @@ class HermesToolParser(ToolParser):
                 extracted_spans.append((match.start(), match.end()))
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
+                raw = match.group(1).strip().replace("\n", "\\n")
+                parse_errors.append(f"tool_call payload invalid or malformed (JSON/required fields/schema): {e}. Raw payload: {raw}")
 
         # remaining text excludes only extracted tool call tokens
         if extracted_spans:
@@ -121,7 +124,7 @@ class HermesToolParser(ToolParser):
         else:
             content = text
 
-        return content, function_calls
+        return content, function_calls, parse_errors
 
 
 @ToolParser.register("gpt-oss")
@@ -149,7 +152,7 @@ class GptOssToolParser(ToolParser):
         )
 
     @rollout_trace_op
-    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall], list[str]]:
         loop = get_event_loop()
         # We need to keep special tokens for gpt-oss model for better tool call extraction.
         text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
@@ -163,6 +166,7 @@ class GptOssToolParser(ToolParser):
             return any(span_start <= start_idx < span_end for span_start, span_end in analysis_spans)
 
         function_calls = []
+        parse_errors: list[str] = []
         extracted_spans: list[tuple[int, int]] = []
         for match in self.tool_call_pattern.finditer(text):
             if _in_analysis(match.start()):
@@ -174,6 +178,8 @@ class GptOssToolParser(ToolParser):
                 extracted_spans.append((match.start(), match.end()))
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
+                raw = match.group(2).strip().replace("\n", "\\n")
+                parse_errors.append(f"Failed to decode tool call JSON: {e}. Raw payload: {raw[:300]}")
 
         content_source = text
         if extracted_spans:
@@ -189,4 +195,4 @@ class GptOssToolParser(ToolParser):
         content = regex.sub(self.cot_pattern, "", content_source)
         content = regex.sub(self.partial_cot_pattern, "", content)
 
-        return content, function_calls
+        return content, function_calls, parse_errors

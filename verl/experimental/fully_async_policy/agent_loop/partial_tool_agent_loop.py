@@ -219,7 +219,11 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        _, agent_data.tool_calls, parse_errors = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+
+        # If tool-call tags are present but malformed, feed back format errors and let model retry.
+        if parse_errors and not agent_data.tool_calls:
+            return await self._handle_tool_call_parse_errors(agent_data, parse_errors)
 
         # Handle interaction if needed
         if self.interaction_config_file:
