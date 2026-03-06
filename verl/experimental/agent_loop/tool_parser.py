@@ -82,7 +82,43 @@ class HermesToolParser(ToolParser):
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
-        self.think_regex = regex.compile(r"<think>.*?</think>", regex.DOTALL)
+        self.think_open_regex = regex.compile(r"<think>")
+        self.think_close_regex = regex.compile(r"</think>")
+
+    def _compute_think_spans(self, text: str) -> list[tuple[int, int]]:
+        """Return reasoning spans, handling unmatched think delimiters at text boundaries."""
+        think_spans: list[tuple[int, int]] = []
+        open_stack: list[int] = []
+        events: list[tuple[int, str, int]] = []
+
+        for m in self.think_open_regex.finditer(text):
+            events.append((m.start(), "open", m.end()))
+        for m in self.think_close_regex.finditer(text):
+            events.append((m.start(), "close", m.end()))
+        events.sort(key=lambda x: x[0])
+
+        for start_idx, event_type, end_idx in events:
+            if event_type == "open":
+                open_stack.append(start_idx)
+            else:
+                if open_stack:
+                    think_spans.append((open_stack.pop(), end_idx))
+                else:
+                    # The opening `<think>` can be part of the generation prompt; treat leading text as reasoning.
+                    think_spans.append((0, end_idx))
+
+        # Merge overlapping spans to make membership checks robust.
+        if not think_spans:
+            return []
+        think_spans.sort(key=lambda span: span[0])
+        merged_spans: list[tuple[int, int]] = [think_spans[0]]
+        for span_start, span_end in think_spans[1:]:
+            last_start, last_end = merged_spans[-1]
+            if span_start <= last_end:
+                merged_spans[-1] = (last_start, max(last_end, span_end))
+            else:
+                merged_spans.append((span_start, span_end))
+        return merged_spans
 
     @rollout_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall], list[str]]:
@@ -91,7 +127,7 @@ class HermesToolParser(ToolParser):
         if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
             return text, [], []
 
-        think_spans = [(m.start(), m.end()) for m in self.think_regex.finditer(text)]
+        think_spans = self._compute_think_spans(text)
 
         def _in_think(start_idx: int) -> bool:
             return any(span_start <= start_idx < span_end for span_start, span_end in think_spans)
