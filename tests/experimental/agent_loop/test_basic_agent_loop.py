@@ -189,6 +189,32 @@ class WeatherToolWithData(BaseTool):
             return ToolResponse(text=str(e)), 0, {}
 
 
+class EchoTool(BaseTool):
+    def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
+        schema = get_json_schema(self.echo)
+        return OpenAIFunctionToolSchema(**schema)
+
+    def echo(self, text: str):
+        """Echo the provided text.
+
+        Args:
+            text: The text to echo back.
+
+        Returns:
+            The input text unchanged.
+        """
+        return text
+
+    async def create(self, create_kwargs: dict[str, Any] | None = None, **kwargs) -> tuple[str, dict[str, Any]]:
+        return "echo-instance", {}
+
+    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
+        return ToolResponse(text=parameters["text"]), 0.0, {}
+
+    async def release(self, instance_id: str, **kwargs) -> None:
+        return None
+
+
 def test_tool_agent(init_config):
     ray.init(
         runtime_env={
@@ -453,3 +479,57 @@ async def test_get_trajectory_info():
     trajectory_info = await get_trajectory_info(step, index, validate=False)
 
     assert trajectory_info == expected_info
+
+
+@pytest.mark.asyncio
+async def test_call_tool_does_not_truncate_when_limit_disabled():
+    from verl.experimental.agent_loop.tool_agent_loop import AgentData, ToolAgentLoop
+    from verl.experimental.agent_loop.tool_parser import FunctionCall
+
+    agent_loop = ToolAgentLoop.__new__(ToolAgentLoop)
+    agent_loop.tools = {"echo": EchoTool(config={})}
+    agent_loop.max_tool_response_length = None
+    agent_loop.tool_response_truncate_side = "middle"
+
+    long_text = "x" * 1024
+    tool_call = FunctionCall(name="echo", arguments=json.dumps({"text": long_text}))
+    agent_data = AgentData(
+        messages=[],
+        image_data=[],
+        video_data=[],
+        metrics={},
+        request_id="req",
+        tools_kwargs={},
+    )
+
+    tool_response, tool_reward, res = await agent_loop._call_tool(tool_call, {}, agent_data)
+
+    assert tool_response.text == long_text
+    assert tool_reward == 0.0
+    assert res == {}
+
+
+@pytest.mark.asyncio
+async def test_call_tool_truncates_when_limit_enabled():
+    from verl.experimental.agent_loop.tool_agent_loop import AgentData, ToolAgentLoop
+    from verl.experimental.agent_loop.tool_parser import FunctionCall
+
+    agent_loop = ToolAgentLoop.__new__(ToolAgentLoop)
+    agent_loop.tools = {"echo": EchoTool(config={})}
+    agent_loop.max_tool_response_length = 10
+    agent_loop.tool_response_truncate_side = "middle"
+
+    long_text = "abcdefghijklmnopqrstuvwxyz"
+    tool_call = FunctionCall(name="echo", arguments=json.dumps({"text": long_text}))
+    agent_data = AgentData(
+        messages=[],
+        image_data=[],
+        video_data=[],
+        metrics={},
+        request_id="req",
+        tools_kwargs={},
+    )
+
+    tool_response, _, _ = await agent_loop._call_tool(tool_call, {}, agent_data)
+
+    assert tool_response.text == "abcde...(truncated)...vwxyz"
