@@ -177,7 +177,7 @@ multi_turn:
   # max parallel call for tools in single turn
   max_parallel_calls: 1
 
-  # max length of tool response
+  # max length of tool response; set to null or 0 to disable truncation
   max_tool_response_length: 256
 
   # truncate side of tool response: left, middle, right
