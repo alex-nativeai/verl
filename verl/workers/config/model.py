@@ -78,6 +78,7 @@ class HFModelConfig(BaseConfig):
         "generation_config",
         "tokenizer",
         "processor",
+        "load_processor",
         "local_path",
         "architectures",
         "local_hf_config_path",
@@ -93,6 +94,10 @@ class HFModelConfig(BaseConfig):
 
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
+
+    # whether to load multimodal processor. Set to False for text-only models (e.g. Qwen3.5-4B)
+    # to use the text-only position-id path in agent loops and avoid VLM-specific get_rope_index.
+    load_processor: bool = True
 
     hf_config: Any = None
     generation_config: Any = None
@@ -155,7 +160,11 @@ class HFModelConfig(BaseConfig):
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
-            self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            self.processor = (
+                hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+                if self.load_processor
+                else None
+            )
 
         if self.custom_chat_template is not None:
             if self.processor is not None:

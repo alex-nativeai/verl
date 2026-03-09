@@ -85,6 +85,19 @@ def get_device_flops(unit="T", device_name=None):
     return flops_unit
 
 
+def _resolve_qwen3_5_config(config):
+    """Qwen3_5Config uses text_config for architecture params; text-only may use Qwen3_5TextConfig directly."""
+    return getattr(config, "text_config", config)
+
+
+def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time, **kargs):
+    return _estimate_qwen2_flops(_resolve_qwen3_5_config(config), tokens_sum, batch_seqlens, delta_time)
+
+
+def _estimate_qwen3_5_moe_flops(config, tokens_sum, batch_seqlens, delta_time, **kargs):
+    return _estimate_qwen2_moe_flops(_resolve_qwen3_5_config(config), tokens_sum, batch_seqlens, delta_time)
+
+
 def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
@@ -543,8 +556,8 @@ ESTIMATE_FUNC = {
     "qwen2_5_vl": _estimate_qwen2_flops,
     "qwen3": _estimate_qwen2_flops,
     "qwen3_moe": _estimate_qwen2_moe_flops,
-    "qwen3_5": _estimate_qwen2_flops,
-    "qwen3_5_moe": _estimate_qwen2_moe_flops,
+    "qwen3_5": _estimate_qwen3_5_flops,
+    "qwen3_5_moe": _estimate_qwen3_5_moe_flops,
     "qwen3_vl": _estimate_qwen3_vl_flops,
     "qwen3_vl_moe": _estimate_qwen3_vl_moe_flops,
     "deepseek_v3": _estimate_deepseek_v3_flops,

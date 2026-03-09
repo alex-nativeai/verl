@@ -136,9 +136,19 @@ def hf_processor(name_or_path, **kwargs):
 
                 processor.get_rope_index = types.MethodType(Qwen2_5_VLModel.get_rope_index, processor)
             case "Qwen3VLProcessor":
-                from transformers.models.qwen3_vl import Qwen3VLModel
+                from verl.models.transformers.qwen3_vl import get_rope_index as verl_qwen3vl_get_rope_index
 
-                processor.get_rope_index = types.MethodType(Qwen3VLModel.get_rope_index, processor)
+                def _qwen3vl_get_rope_index(input_ids=None, image_grid_thw=None, video_grid_thw=None, attention_mask=None, **kwargs):
+                    # Use verl's get_rope_index (no mm_token_type_ids) - compatible with transformers API changes
+                    pos_ids = verl_qwen3vl_get_rope_index(
+                        processor, input_ids, image_grid_thw, video_grid_thw, attention_mask
+                    )
+                    # agent_loop expects (vision_position_ids, _) with shape (3, 1, seq_len) for transpose
+                    if pos_ids.dim() == 2:
+                        pos_ids = pos_ids.unsqueeze(1)
+                    return (pos_ids, None)
+
+                processor.get_rope_index = _qwen3vl_get_rope_index
             case "Glm4vImageProcessor":
                 from transformers.models.glm4v import Glm4vModel
 
